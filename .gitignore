@@ -1,0 +1,24 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+
+# Local model configuration holds machine-specific paths.
+models.yml
+
+# Copied from the repository root by the pi-lite prepack script.
+packages/lite/README.md
+packages/lite/LICENSE
+*.tgz
+
+# Editor files
+.vscode/
+.zed/
+.idea/
+.claude/
+*.swp
+*.swo
+*~

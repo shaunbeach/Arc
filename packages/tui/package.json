@@ -1,0 +1,26 @@
+{
+	"name": "@earendil-works/pi-tui",
+	"version": "0.85.1",
+	"private": true,
+	"description": "Main-screen terminal UI with differential rendering, trimmed to what pi-lite uses",
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts"
+	},
+	"author": "Mario Zechner",
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"get-east-asian-width": "1.6.0",
+		"marked": "18.0.11"
+	},
+	"devDependencies": {
+		"@xterm/headless": "5.5.0",
+		"chalk": "6.0.0"
+	}
+}

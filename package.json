@@ -1,0 +1,23 @@
+{
+	"name": "pi-lite-workspace",
+	"private": true,
+	"description": "A lean terminal coding harness for local llama.cpp models",
+	"type": "module",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "npm run build --workspace pi-lite",
+		"dev": "node packages/lite/src/cli.ts",
+		"check": "biome check --write --error-on-warnings . && tsgo --noEmit",
+		"test": "npm test --workspace pi-lite && npm test --workspace @earendil-works/pi-tui"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "22.19.19",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
