@@ -173,6 +173,32 @@ describe("runAgentLoop", () => {
 		expect(textOf(added[2])).toMatch(/response hit max_tokens/);
 	});
 
+	it("runs the finished tool calls of a response cut off by max_tokens and refuses only the last one", async () => {
+		const log: string[] = [];
+		const { streamFn } = script(
+			{
+				content: [call("c1", "echo", { text: "whole" }), call("c2", "echo", { text: "cut" })],
+				stopReason: "length",
+			},
+			{ content: [say("resending")] },
+		);
+		const { added } = await run(streamFn, [echoTool(log)]);
+		const results = added.filter((message) => message.role === "toolResult");
+		expect(log).toEqual(["whole"]);
+		expect(results.map((result) => result.role === "toolResult" && result.isError)).toEqual([false, true]);
+		expect(textOf(results[1])).toMatch(/response hit max_tokens/);
+	});
+
+	it("runs every tool call when max_tokens cuts off text after them", async () => {
+		const log: string[] = [];
+		const { streamFn } = script(
+			{ content: [call("c1", "echo", { text: "a" }), say("and now I will")], stopReason: "length" },
+			{ content: [say("done")] },
+		);
+		await run(streamFn, [echoTool(log)]);
+		expect(log).toEqual(["a"]);
+	});
+
 	it("ends the run on a failed response", async () => {
 		const { streamFn, requests } = script({ content: [], stopReason: "error" });
 		const { added, events } = await run(streamFn, []);

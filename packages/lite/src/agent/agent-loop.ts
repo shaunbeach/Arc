@@ -40,10 +40,12 @@ export async function runAgentLoop(
 		}
 
 		const toolCalls = message.content.filter((block): block is ToolCall => block.type === "toolCall");
+		// Blocks stream in order, so max_tokens can only cut off the last one. Earlier calls finished streaming and run.
+		const cutOff = message.stopReason === "length" ? message.content.at(-1) : undefined;
 		const toolResults: ToolResultMessage[] = [];
 		for (const toolCall of toolCalls) {
 			if (signal?.aborted) break;
-			const result = await runToolCall(context.tools, toolCall, message.stopReason === "length", emit, signal);
+			const result = await runToolCall(context.tools, toolCall, toolCall === cutOff, emit, signal);
 			toolResults.push(result);
 			await append(result);
 		}
