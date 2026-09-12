@@ -92,7 +92,10 @@ export function createEditTool(options: CodingToolOptions): AgentTool<typeof edi
 
 			const { diff, firstChangedLine } = generateDiffString(normalized, updated);
 			const where = firstChangedLine === undefined ? "" : ` at line ${firstChangedLine}`;
-			return { content: [{ type: "text", text: `Edited ${path}${where}.` }], details: { diff, firstChangedLine } };
+			return {
+				content: [{ type: "text", text: `Edited ${path}${where}. Do not repeat its contents in your reply.` }],
+				details: { diff, firstChangedLine },
+			};
 		},
 	};
 }

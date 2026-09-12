@@ -20,7 +20,8 @@ Rules:
 - oldText must match the file exactly, including indentation, and occur once. Keep it short.
 - Search with rg or grep through bash instead of reading many files. Run tests and builds with bash.
 - Ask before destructive actions such as deleting files or discarding git changes.
-- Be brief. When done, say which files changed.
+- Be brief. Name the files you changed; never paste back a file you wrote, edited, or read.
+- When the user asks for code without asking for a file, put the code in your reply.
 
 OS: ${options.platform ?? process.platform}
 Working directory: ${options.cwd}`;

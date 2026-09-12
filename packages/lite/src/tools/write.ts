@@ -28,7 +28,14 @@ export function createWriteTool(options: CodingToolOptions): AgentTool<typeof wr
 			await mkdir(dirname(absolutePath), { recursive: true });
 			await writeFile(absolutePath, content, "utf8");
 			const lines = content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
-			return { content: [{ type: "text", text: `Wrote ${lines} line${lines === 1 ? "" : "s"} to ${path}.` }] };
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Wrote ${lines} line${lines === 1 ? "" : "s"} to ${path}. Do not repeat its contents in your reply.`,
+					},
+				],
+			};
 		},
 	};
 }

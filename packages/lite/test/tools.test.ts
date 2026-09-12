@@ -97,7 +97,7 @@ describe("write", () => {
 	it("creates parent directories and reports the line count", async () => {
 		const options = setup();
 		const result = await run(createWriteTool(options), { path: "nested/dir/x.txt", content: "a\nb\n" });
-		expect(text(result)).toBe("Wrote 2 lines to nested/dir/x.txt.");
+		expect(text(result)).toBe("Wrote 2 lines to nested/dir/x.txt. Do not repeat its contents in your reply.");
 		expect(readFileSync(join(options.cwd, "nested/dir/x.txt"), "utf8")).toBe("a\nb\n");
 	});
 
@@ -126,7 +126,7 @@ describe("edit", () => {
 	it("replaces a unique block and reports the first changed line", async () => {
 		const { result, read } = editFile("a\nb\nc\n", { oldText: "b", newText: "B" });
 		const done = await result;
-		expect(text(done)).toBe("Edited f.txt at line 2.");
+		expect(text(done)).toBe("Edited f.txt at line 2. Do not repeat its contents in your reply.");
 		expect(read()).toBe("a\nB\nc\n");
 		expect(done.details).toEqual({ firstChangedLine: 2, diff: " 1 a\n-2 b\n+2 B\n 3 c" });
 	});
