@@ -86,7 +86,11 @@ export function createReadTool(options: CodingToolOptions): AgentTool<typeof rea
 	return {
 		name: "read",
 		label: "read",
-		description: "Read a file or list a directory. Long files are cut off; page with offset and limit.",
+		// Models that can see images have no other way to learn it: without this they reach for OCR through bash,
+		// or refuse outright. Only image models pay the extra tokens, so the text-only prompt stays byte-identical.
+		description: options.acceptsImages
+			? "Read a file or list a directory. Long files are cut off; page with offset and limit. Reading an image (png, jpg, gif, webp) attaches it for you to look at directly."
+			: "Read a file or list a directory. Long files are cut off; page with offset and limit.",
 		parameters: readSchema,
 		async execute(_toolCallId, { path, offset, limit }, signal) {
 			const absolutePath = resolveToolPath(path, options.cwd);

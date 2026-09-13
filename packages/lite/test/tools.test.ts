@@ -91,6 +91,12 @@ describe("read", () => {
 		const result = await run(createReadTool(options), { path: "@shot.png" });
 		expect(result.content[1]).toEqual({ type: "image", data: "ZmFrZQ==", mimeType: "image/png" });
 	});
+
+	it("tells image models they can see, and says nothing about images to the rest", () => {
+		// Without this, models with vision reach for OCR through bash or deny they can see at all.
+		expect(createReadTool(setup(DEFAULT_LIMITS, true)).description).toContain("attaches it for you to look at");
+		expect(createReadTool(setup(DEFAULT_LIMITS, false)).description).not.toContain("image");
+	});
 });
 
 describe("write", () => {
