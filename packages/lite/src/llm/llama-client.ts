@@ -40,7 +40,7 @@ export type ChatMessage =
 	| { role: "system"; content: string }
 	| { role: "user"; content: string | ChatContentPart[] }
 	| AssistantChatMessage
-	| { role: "tool"; tool_call_id: string; content: string };
+	| { role: "tool"; tool_call_id: string; content: string | ChatContentPart[] };
 
 const USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -108,21 +108,13 @@ export function convertMessages(model: LiteModel, context: Context, preset: Samp
 
 	let pendingCalls: ToolCall[] = [];
 	let answered = new Set<string>();
-	let toolImages: ChatContentPart[] = [];
 	const closeToolTurn = () => {
 		for (const call of pendingCalls) {
 			if (!answered.has(call.id))
 				messages.push({ role: "tool", tool_call_id: call.id, content: "No result provided" });
 		}
-		if (toolImages.length > 0) {
-			messages.push({
-				role: "user",
-				content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...toolImages],
-			});
-		}
 		pendingCalls = [];
 		answered = new Set();
-		toolImages = [];
 	};
 
 	for (const [index, message] of context.messages.entries()) {
@@ -163,8 +155,18 @@ export function convertMessages(model: LiteModel, context: Context, preset: Samp
 				if (images.length === 0) content = "(no tool output)";
 				else content = acceptsImages ? "(see attached image)" : TOOL_IMAGE_PLACEHOLDER;
 			}
-			messages.push({ role: "tool", tool_call_id: message.toolCallId, content: sanitize(content) });
-			if (acceptsImages) toolImages.push(...images.map(imagePart));
+			// Images ride inside the tool message. Following it with a user message carrying them instead puts a user
+			// turn directly after a tool result, which Mistral templates reject with a 500. Text-only results stay
+			// plain strings, so the overwhelmingly common path is byte-identical and the KV prefix still matches.
+			const withImages =
+				acceptsImages && images.length > 0
+					? [{ type: "text" as const, text: sanitize(content) }, ...images.map(imagePart)]
+					: undefined;
+			messages.push({
+				role: "tool",
+				tool_call_id: message.toolCallId,
+				content: withImages ?? sanitize(content),
+			});
 		}
 	}
 	closeToolTurn();

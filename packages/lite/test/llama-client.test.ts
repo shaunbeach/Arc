@@ -76,6 +76,39 @@ describe("convertMessages", () => {
 		expect(convertMessages(model, turn, instruct)[2]).not.toHaveProperty("reasoning_content");
 	});
 
+	it("puts tool-result images in the tool message and adds no user turn after it", () => {
+		// A user message directly after a tool result is rejected outright by Mistral chat templates, so images
+		// ride inside the tool message. Verified against Qwen, Ornith and Ministral servers.
+		const withImage: ToolResultMessage = {
+			...toolResult("c1", "(see attached image)"),
+			content: [
+				{ type: "text", text: "(see attached image)" },
+				{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+			],
+		};
+		const turnWithImage = context([user("hi"), assistant([readCall("c1")], "toolUse"), withImage]);
+		const seeing: LiteModel = { ...model, input: ["text", "image"] };
+
+		const messages = convertMessages(seeing, turnWithImage, thinking);
+		// Exactly four: the absence of a fifth message is the regression this guards against.
+		expect(messages).toHaveLength(4);
+		expect(messages[3]).toEqual({
+			role: "tool",
+			tool_call_id: "c1",
+			content: [
+				{ type: "text", text: "(see attached image)" },
+				{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
+			],
+		});
+
+		// Text-only models keep a plain string, so the common path stays byte-identical.
+		expect(convertMessages(model, turnWithImage, thinking)[3]).toEqual({
+			role: "tool",
+			tool_call_id: "c1",
+			content: "(see attached image)",
+		});
+	});
+
 	it("replays reasoning from earlier turns only when thinkingHistory is all", () => {
 		const history = context([...turn.messages, assistant([{ type: "text", text: "Done." }]), user("next")]);
 		expect(convertMessages(model, history, thinking)[2]).not.toHaveProperty("reasoning_content");
