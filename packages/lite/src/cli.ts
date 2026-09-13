@@ -24,6 +24,7 @@ import {
 } from "./session.ts";
 import { createToolsForModel, killRunningCommands } from "./tools/index.ts";
 import { runInteractive } from "./tui/app.ts";
+import { formatDuration } from "./tui/components.ts";
 
 const HELP = `Usage:
   pi-lite [options]                Start an interactive session
@@ -156,7 +157,9 @@ async function runPrint(options: PrintOptions): Promise<number> {
 	agent.subscribe(printEvent);
 
 	const earlierMessages = agent.messages.length;
+	const startedAt = Date.now();
 	await agent.prompt(options.prompt);
+	const elapsedMs = Date.now() - startedAt;
 
 	const replies = agent.messages
 		.slice(earlierMessages)
@@ -166,7 +169,7 @@ async function runPrint(options: PrintOptions): Promise<number> {
 	const output = replies.reduce((sum, reply) => sum + reply.usage.completionTokens, 0);
 	const speed = last.timings ? ` · ${last.timings.predictedPerSecond.toFixed(1)} tok/s` : "";
 	status(
-		`[${model.name} · ${mode}] ${replies.length} requests · last prompt ${last.usage.promptTokens} (cached ${last.usage.cachedTokens}) · output ${output}${speed} · ${last.stopReason}`,
+		`[${model.name} · ${mode}] ${replies.length} requests · last prompt ${last.usage.promptTokens} (cached ${last.usage.cachedTokens}) · output ${output}${speed} · took ${formatDuration(elapsedMs)} · ${last.stopReason}`,
 	);
 	return 0;
 }

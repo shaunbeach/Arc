@@ -241,9 +241,23 @@ export interface FooterState {
 	cwd: string;
 	/** The latest reply with token usage, for context fill and speed. */
 	lastReply?: AssistantMessage;
+	/** Wall time of the last finished turn, in ms. Absent until one completes. */
+	lastTurnMs?: number;
 }
 
-/** `model · mode · ctx used/window · tok/s · cwd` */
+/** `47s`, `8m 12s`, `1h 3m`. Elapsed time for the footer and the print-mode summary. */
+export function formatDuration(ms: number): string {
+	const total = Math.round(ms / 1000);
+	if (total < 60) return `${total}s`;
+	const minutes = Math.floor(total / 60);
+	const seconds = total % 60;
+	if (minutes < 60) return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+	const hours = Math.floor(minutes / 60);
+	const rest = minutes % 60;
+	return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+}
+
+/** `model · mode · ctx used/window · tok/s · took · cwd` */
 export function formatFooter(state: FooterState): string {
 	const parts = [state.model.name, state.mode];
 	const usage = state.lastReply?.usage;
@@ -253,6 +267,7 @@ export function formatFooter(state: FooterState): string {
 	}
 	const speed = state.lastReply?.timings?.predictedPerSecond;
 	if (speed) parts.push(`${speed.toFixed(1)} tok/s`);
+	if (state.lastTurnMs !== undefined) parts.push(`took ${formatDuration(state.lastTurnMs)}`);
 	const home = homedir();
 	parts.push(state.cwd.startsWith(home) ? `~${state.cwd.slice(home.length)}` : state.cwd);
 	return style.gray(` ${parts.join(" · ")}`);

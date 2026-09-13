@@ -103,6 +103,8 @@ class InteractiveApp {
 	private readonly agent: Agent;
 	private session: SessionFile | undefined;
 	private lastReply: AssistantMessage | undefined;
+	/** Wall time of the last finished turn, shown in the footer. */
+	private lastTurnMs: number | undefined;
 	private streamingView: AssistantView | undefined;
 	private readonly toolViews = new Map<string, ToolView>();
 	/** Messages typed while llama-server was starting, sent once the current prompt finishes. */
@@ -238,8 +240,11 @@ class InteractiveApp {
 					break;
 				}
 				this.setStatus("working");
+				const turnStarted = Date.now();
 				await this.agent.prompt(next);
+				this.lastTurnMs = Date.now() - turnStarted;
 				this.setStatus(undefined);
+				this.updateFooter();
 
 				const queued = [...this.pending, ...this.agent.takeQueued().map(userText)];
 				this.pending = [];
@@ -407,6 +412,7 @@ class InteractiveApp {
 		this.agent.mode = defaultSamplingMode(model);
 		this.agent.tools = createToolsForModel(model, this.options.cwd);
 		this.lastReply = undefined;
+		this.lastTurnMs = undefined;
 		this.session?.updateSettings({ model: model.name, mode: this.agent.mode });
 		writeLastUsed(getAppDir(), { model: model.name, mode: this.agent.mode });
 		this.notice(style.gray(`Model: ${model.name} (${this.agent.mode})`));
@@ -431,6 +437,7 @@ class InteractiveApp {
 		if (!this.requireIdle()) return;
 		this.agent.setMessages([]);
 		this.lastReply = undefined;
+		this.lastTurnMs = undefined;
 		if (this.options.saveSessions) {
 			this.session = SessionFile.create(this.appDir, this.options.cwd, {
 				model: this.agent.model.name,
@@ -591,6 +598,7 @@ class InteractiveApp {
 				mode: this.agent.mode,
 				cwd: this.options.cwd,
 				lastReply: this.lastReply,
+				lastTurnMs: this.lastTurnMs,
 			}),
 		);
 		this.tui.requestRender();
