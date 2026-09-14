@@ -76,9 +76,10 @@ describe("convertMessages", () => {
 		expect(convertMessages(model, turn, instruct)[2]).not.toHaveProperty("reasoning_content");
 	});
 
-	it("puts tool-result images in the tool message and adds no user turn after it", () => {
-		// A user message directly after a tool result is rejected outright by Mistral chat templates, so images
-		// ride inside the tool message. Verified against Qwen, Ornith and Ministral servers.
+	it("bridges tool-result images to a user message with an assistant turn between", () => {
+		// Images may only travel in a user message, but a user message straight after a tool result is rejected by
+		// Mistral templates, and images inside the tool message make Mistral misread them. The assistant turn in
+		// between is the only shape all three vision models read correctly against live servers.
 		const withImage: ToolResultMessage = {
 			...toolResult("c1", "(see attached image)"),
 			content: [
@@ -90,23 +91,22 @@ describe("convertMessages", () => {
 		const seeing: LiteModel = { ...model, input: ["text", "image"] };
 
 		const messages = convertMessages(seeing, turnWithImage, thinking);
-		// Exactly four: the absence of a fifth message is the regression this guards against.
-		expect(messages).toHaveLength(4);
-		expect(messages[3]).toEqual({
-			role: "tool",
-			tool_call_id: "c1",
+		expect(messages).toHaveLength(6);
+		// The tool result stays a plain string: images never ride inside it.
+		expect(messages[3]).toEqual({ role: "tool", tool_call_id: "c1", content: "(see attached image)" });
+		expect(messages[4]).toEqual({ role: "assistant", content: "Looking at the attached image(s)." });
+		expect(messages[5]).toEqual({
+			role: "user",
 			content: [
-				{ type: "text", text: "(see attached image)" },
+				{ type: "text", text: "Attached image(s) from tool result:" },
 				{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
 			],
 		});
 
-		// Text-only models keep a plain string, so the common path stays byte-identical.
-		expect(convertMessages(model, turnWithImage, thinking)[3]).toEqual({
-			role: "tool",
-			tool_call_id: "c1",
-			content: "(see attached image)",
-		});
+		// Text-only models get neither the bridge nor the images, so the common path is byte-identical.
+		const plain = convertMessages(model, turnWithImage, thinking);
+		expect(plain).toHaveLength(4);
+		expect(plain[3]).toEqual({ role: "tool", tool_call_id: "c1", content: "(see attached image)" });
 	});
 
 	it("replays reasoning from earlier turns only when thinkingHistory is all", () => {

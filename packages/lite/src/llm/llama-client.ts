@@ -40,10 +40,12 @@ export type ChatMessage =
 	| { role: "system"; content: string }
 	| { role: "user"; content: string | ChatContentPart[] }
 	| AssistantChatMessage
-	| { role: "tool"; tool_call_id: string; content: string | ChatContentPart[] };
+	| { role: "tool"; tool_call_id: string; content: string };
 
 const USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
+/** Bridges a tool result to the user message carrying its images. See closeToolTurn for why it exists. */
+const TOOL_IMAGE_BRIDGE = "Looking at the attached image(s).";
 
 /** Above this many characters, streamed tool-call arguments are parsed only once, when the call completes. */
 const MAX_LIVE_ARGUMENT_PARSE = 2048;
@@ -108,13 +110,27 @@ export function convertMessages(model: LiteModel, context: Context, preset: Samp
 
 	let pendingCalls: ToolCall[] = [];
 	let answered = new Set<string>();
+	let toolImages: ChatContentPart[] = [];
 	const closeToolTurn = () => {
 		for (const call of pendingCalls) {
 			if (!answered.has(call.id))
 				messages.push({ role: "tool", tool_call_id: call.id, content: "No result provided" });
 		}
+		if (toolImages.length > 0) {
+			// Images can only travel in a user message, but a user message straight after a tool result is rejected
+			// by Mistral templates (HTTP 500), and putting the images inside the tool message makes Mistral read the
+			// wrong row of an image it otherwise reads correctly. A one-line assistant turn between the two is the
+			// only shape all three vision models read correctly: verified 9/9 against live Qwen3.5-4B, Ornith-1.5-9B
+			// and Ministral-3-8B servers, under the real system prompt and tool definitions.
+			messages.push({ role: "assistant", content: TOOL_IMAGE_BRIDGE });
+			messages.push({
+				role: "user",
+				content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...toolImages],
+			});
+		}
 		pendingCalls = [];
 		answered = new Set();
+		toolImages = [];
 	};
 
 	for (const [index, message] of context.messages.entries()) {
@@ -155,18 +171,8 @@ export function convertMessages(model: LiteModel, context: Context, preset: Samp
 				if (images.length === 0) content = "(no tool output)";
 				else content = acceptsImages ? "(see attached image)" : TOOL_IMAGE_PLACEHOLDER;
 			}
-			// Images ride inside the tool message. Following it with a user message carrying them instead puts a user
-			// turn directly after a tool result, which Mistral templates reject with a 500. Text-only results stay
-			// plain strings, so the overwhelmingly common path is byte-identical and the KV prefix still matches.
-			const withImages =
-				acceptsImages && images.length > 0
-					? [{ type: "text" as const, text: sanitize(content) }, ...images.map(imagePart)]
-					: undefined;
-			messages.push({
-				role: "tool",
-				tool_call_id: message.toolCallId,
-				content: withImages ?? sanitize(content),
-			});
+			messages.push({ role: "tool", tool_call_id: message.toolCallId, content: sanitize(content) });
+			if (acceptsImages) toolImages.push(...images.map(imagePart));
 		}
 	}
 	closeToolTurn();
