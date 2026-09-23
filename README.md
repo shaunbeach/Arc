@@ -88,7 +88,7 @@ pi-lite --list-models                          # * marks the model -p uses witho
 pi-lite --show-prompt                          # system prompt and tool definitions, with a token estimate
 ```
 
-An interactive session starts without a model; `/model` opens a picker, and a message sent before then opens it too. `-c`, `-r`, and `--session` load the model the session used.
+The startup banner lists this directory's five most recent sessions (three on a narrow terminal), numbered for `/resume`. An interactive session starts without a model; `/model` opens a picker, and a message sent before then opens it too. `-c`, `-r`, and `--session` load the model the session used.
 
 | Command | Effect |
 |---|---|
@@ -100,7 +100,8 @@ An interactive session starts without a model; `/model` opens a picker, and a me
 | `/serve [name]` | Host a model for other machines. See [Hosting](#hosting). |
 | `/disconnect` | Stop llama-server and unload the model without exiting. |
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
-| `/resume [id]` | Resume a saved session. Without an id, opens a picker. |
+| `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
+| `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
 | `/quit` | Exit. |
 
 | Key | Effect |
