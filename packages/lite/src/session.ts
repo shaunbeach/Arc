@@ -52,7 +52,9 @@ function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boole
 export type SessionEntry =
 	| SessionHeader
 	| ({ type: "settings"; timestamp: number } & SessionSettings)
-	| { type: "message"; message: Message };
+	| { type: "message"; message: Message }
+	/** From `/name`; the latest one names the session. */
+	| { type: "name"; name: string; timestamp: number };
 
 export interface LoadedSession {
 	path: string;
@@ -60,6 +62,8 @@ export interface LoadedSession {
 	messages: Message[];
 	/** The last recorded model and mode, if any. */
 	settings?: SessionSettings;
+	/** The name given with `/name`, if any. */
+	name?: string;
 }
 
 export interface SessionSummary {
@@ -69,6 +73,35 @@ export interface SessionSummary {
 	bytes: number;
 	/** First user message, whitespace collapsed. Empty when none was found. */
 	preview: string;
+	/** The name given with `/name`, if any. */
+	name?: string;
+}
+
+/** What lists show for a session: its `/name`, else its first message. */
+export function sessionLabel(session: Pick<SessionSummary, "name" | "preview">): string {
+	return session.name || session.preview || "(no messages)";
+}
+
+/**
+ * The session `/resume <query>` means, among `sessions` in the order lists show them: a number picks by position
+ * (`1` is the most recent), otherwise an id prefix or part of a `/name`, matched when exactly one session fits.
+ */
+export function matchSession(
+	sessions: readonly SessionSummary[],
+	query: string,
+): { session: SessionSummary } | { error: string } {
+	const q = query.trim();
+	if (/^\d+$/.test(q)) {
+		const session = sessions[Number(q) - 1];
+		return session ? { session } : { error: `There is no session ${q}; ${sessions.length} saved here.` };
+	}
+	const byId = sessions.filter((session) => session.id.startsWith(q));
+	if (byId.length === 1) return { session: byId[0] };
+	const lower = q.toLowerCase();
+	const byName = sessions.filter((session) => session.name?.toLowerCase().includes(lower));
+	if (byName.length === 1) return { session: byName[0] };
+	if (byId.length + byName.length > 1) return { error: `"${q}" matches more than one session. Use more of it.` };
+	return { error: `No saved session matches "${q}".` };
 }
 
 /** Sessions are grouped per working directory, so `--continue` and `/resume` only offer this project's sessions. */
@@ -89,6 +122,8 @@ export class SessionFile {
 	private readonly cwd: string;
 	private settings: SessionSettings;
 	private created: boolean;
+	/** A `/name` given before the first message, written when the file is created. */
+	private pendingName: string | undefined;
 
 	private constructor(id: string, path: string, cwd: string, settings: SessionSettings, created: boolean) {
 		this.id = id;
@@ -126,8 +161,17 @@ export class SessionFile {
 			const createdAt = new Date().toISOString();
 			this.write({ type: "session", version: SESSION_VERSION, id: this.id, cwd: this.cwd, createdAt });
 			this.write({ type: "settings", ...this.settings, timestamp: Date.now() });
+			if (this.pendingName !== undefined)
+				this.write({ type: "name", name: this.pendingName, timestamp: Date.now() });
+			this.pendingName = undefined;
 		}
 		this.write({ type: "message", message });
+	}
+
+	/** Names the session for `/resume` and the banner. Before the first message, it is written with the file. */
+	setName(name: string): void {
+		if (this.created) this.write({ type: "name", name, timestamp: Date.now() });
+		else this.pendingName = name;
 	}
 
 	private write(entry: SessionEntry): void {
@@ -146,6 +190,7 @@ export function loadSession(path: string): LoadedSession {
 	const lines = readFileSync(path, "utf8").split("\n");
 	let header: SessionHeader | undefined;
 	let settings: SessionSettings | undefined;
+	let name: string | undefined;
 	const messages: Message[] = [];
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
@@ -169,10 +214,30 @@ export function loadSession(path: string): LoadedSession {
 				settings.interactionMode = entry.interactionMode;
 			}
 			if (entry.web === false) settings.web = false;
+		} else if (entry.type === "name" && typeof entry.name === "string") {
+			name = entry.name;
 		}
 	}
 	if (!header) throw new Error(`${path} is empty.`);
-	return { path, header, messages, settings };
+	return { path, header, messages, settings, ...(name ? { name } : {}) };
+}
+
+/**
+ * The latest `/name` in a session file. Names are rare and may sit anywhere in a long file, so the whole file is
+ * searched rather than the preview's head; session files are small enough for that.
+ */
+function nameIn(path: string, size: number): { name?: string } {
+	if (size === 0) return {};
+	const text = readFileSync(path, "utf8");
+	const at = text.lastIndexOf('{"type":"name"');
+	if (at === -1) return {};
+	const end = text.indexOf("\n", at);
+	try {
+		const entry = JSON.parse(text.slice(at, end === -1 ? undefined : end)) as { name?: unknown };
+		return typeof entry.name === "string" && entry.name ? { name: entry.name } : {};
+	} catch {
+		return {};
+	}
 }
 
 function readSummary(path: string): SessionSummary {
@@ -196,7 +261,7 @@ function readSummary(path: string): SessionSummary {
 				break;
 			}
 		}
-		return { id: header.id, path, modified: info.mtime, bytes: info.size, preview };
+		return { id: header.id, path, modified: info.mtime, bytes: info.size, preview, ...nameIn(path, info.size) };
 	} finally {
 		closeSync(fd);
 	}

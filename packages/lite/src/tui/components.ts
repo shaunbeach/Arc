@@ -15,6 +15,7 @@ import type { LiteModel } from "../config/models.ts";
 import type { SamplingMode } from "../config/sampling.ts";
 import type { AssistantMessage, ToolCall } from "../llm/types.ts";
 import type { InteractionMode } from "../prompt.ts";
+import { accent, renderLogo } from "./logo.ts";
 import { markdownTheme, style } from "./theme.ts";
 
 /** Lines of streamed reasoning shown while the model thinks. */
@@ -55,13 +56,67 @@ export class Line implements Component {
 	}
 }
 
+/** One line of the banner's recent sessions: when it was last used, and what to call it. */
+export interface RecentSession {
+	when: string;
+	label: string;
+}
+
 export interface BannerOptions {
 	version: string;
 	cwd: string;
 	modelName?: string;
 	mode?: string;
+	/** Most recent first; `/resume 1` is the first. */
+	recent?: readonly RecentSession[];
 }
 
+/** Sessions the banner lists: as many as the logo's height leaves room for on a wide terminal, three otherwise. */
+export const BANNER_RECENT = { wide: 5, narrow: 3 } as const;
+/** Width of the banner's left column: the logo and the model under it. */
+const BANNER_LEFT = 24;
+/** Narrower terminals get a text-only banner. */
+const BANNER_TWO_COLUMNS_MIN_WIDTH = 72;
+
+/** `today 3:05 AM`, `yesterday 9:12 PM`, `Mon 4:40 PM` within the week, `Sep 20`, or `Sep 20, 2025`. */
+export function formatSessionDate(date: Date, now = new Date()): string {
+	const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+	const days = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+	if (days === 0) return `today ${time}`;
+	if (days === 1) return `yesterday ${time}`;
+	if (days > 1 && days < 7) return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+	const sameYear = date.getFullYear() === now.getFullYear();
+	return date.toLocaleDateString(undefined, {
+		month: "short",
+		day: "numeric",
+		...(sameYear ? {} : { year: "numeric" }),
+	});
+}
+
+/** `text` cut from the front, so the end of a long path stays visible. */
+function truncateStart(text: string, width: number): string {
+	if (visibleWidth(text) <= width) return text;
+	return `…${text.slice(text.length - Math.max(0, width - 1))}`;
+}
+
+/** `text` padded or cut to exactly `width` columns. */
+function padTo(text: string, width: number): string {
+	const cut = truncateToWidth(text, width);
+	return cut + " ".repeat(Math.max(0, width - visibleWidth(cut)));
+}
+
+function center(text: string, width: number): string {
+	const cut = truncateToWidth(text, width);
+	const space = Math.max(0, width - visibleWidth(cut));
+	const left = Math.floor(space / 2);
+	return " ".repeat(left) + cut + " ".repeat(space - left);
+}
+
+/**
+ * The startup banner. On a wide terminal it has two columns like omp's: the logo with the model under it, then
+ * the commands, the workspace, and the recent sessions. A narrow terminal gets the same text in one column.
+ */
 export class BannerView implements Component {
 	options: BannerOptions;
 	private cached?: { width: number; lines: string[] };
@@ -85,51 +140,84 @@ export class BannerView implements Component {
 		this.cached = undefined;
 	}
 
+	private displayCwd(): string {
+		const home = homedir();
+		return this.options.cwd.startsWith(home) ? `~${this.options.cwd.slice(home.length)}` : this.options.cwd;
+	}
+
+	private recentLines(limit: number): string[] {
+		const recent = (this.options.recent ?? []).slice(0, limit);
+		if (recent.length === 0) return [style.gray("No saved sessions in this workspace yet")];
+		const whenWidth = Math.max(...recent.map((session) => visibleWidth(session.when)));
+		return recent.map(
+			(session, i) =>
+				`${style.cyan(String(i + 1))}  ${style.gray(padTo(session.when, whenWidth))}  ${session.label}`,
+		);
+	}
+
 	render(width: number): string[] {
 		if (this.cached?.width === width) return this.cached.lines;
+		const lines = width >= BANNER_TWO_COLUMNS_MIN_WIDTH ? this.renderColumns(width) : this.renderSingle(width);
+		this.cached = { width, lines };
+		return lines;
+	}
 
+	private renderColumns(width: number): string[] {
+		const boxWidth = Math.min(width, 100);
+		// │ left │ right │, with a space either side of the right column.
+		const right = boxWidth - BANNER_LEFT - 5;
+		// omp's scheme: a gray frame and divider, plain version text, headings in bold sky blue.
+		const border = style.gray;
+		const heading = (text: string) => style.bold(accent(text));
+		const rule = style.gray("─".repeat(right));
+
+		const left = [
+			...renderLogo().map((line) => center(line, BANNER_LEFT)),
+			center(this.options.modelName ? style.green(this.options.modelName) : style.gray("no model"), BANNER_LEFT),
+			center(this.options.mode ? style.dim(this.options.mode) : "", BANNER_LEFT),
+		];
+		const rightLines = [
+			heading("Commands"),
+			`${style.cyan("/")} for the command menu · ${style.cyan("/model")} to pick a model`,
+			`${style.cyan("/resume")} to continue a session · ${style.cyan("/name")} to name this one`,
+			rule,
+			heading("Workspace"),
+			style.yellow(truncateStart(this.displayCwd(), right)),
+			rule,
+			heading("Recent sessions"),
+			...this.recentLines(BANNER_RECENT.wide),
+		];
+
+		const title = ` pi-lite v${this.options.version} `;
+		const top = `${border("╭─")}${title}${border(`${"─".repeat(Math.max(0, boxWidth - 3 - title.length))}╮`)}`;
+		const lines = ["", top];
+		const rows = Math.max(left.length, rightLines.length);
+		for (let row = 0; row < rows; row++) {
+			const leftCell = left[row] ?? " ".repeat(BANNER_LEFT);
+			lines.push(`${border("│")}${leftCell}${border("│")} ${padTo(rightLines[row] ?? "", right)} ${border("│")}`);
+		}
+		lines.push(border(`╰${"─".repeat(Math.max(0, boxWidth - 2))}╯`));
+		return lines;
+	}
+
+	private renderSingle(width: number): string[] {
 		const boxWidth = Math.min(width, Math.min(Math.max(40, width - 2), 62));
 		const contentWidth = Math.max(0, boxWidth - 4);
-
-		const home = homedir();
-		const displayCwd = this.options.cwd.startsWith(home)
-			? `~${this.options.cwd.slice(home.length)}`
-			: this.options.cwd;
-
-		const innerLines: string[] = [];
-
-		// Title line
-		const title = `${style.bold(style.cyan("⚡ Pi-Lite CLI"))} ${style.gray(`v${this.options.version}`)}`;
-		innerLines.push(title);
-
-		// Model line (ONLY if loaded by user!)
-		if (this.options.modelName) {
-			const modeTag = this.options.mode ? ` (${this.options.mode})` : "";
-			const modelLine = `${style.dim("Model:     ")}${style.green(this.options.modelName)}${style.dim(modeTag)}`;
-			innerLines.push(modelLine);
-		}
-
-		// Workspace line
-		const cwdLine = `${style.dim("Workspace: ")}${style.yellow(displayCwd)}`;
-		innerLines.push(cwdLine);
-
-		// Hint line
-		const hint = `${style.dim("Commands:  type ")}${style.cyan("/")}${style.dim(" for menu, ")}${style.cyan("/model")}${style.dim(" to select")}`;
-		innerLines.push(hint);
-
-		// Build the bordered box
-		const top = style.cyan(`╭${"─".repeat(Math.max(0, boxWidth - 2))}╮`);
-		const bottom = style.cyan(`╰${"─".repeat(Math.max(0, boxWidth - 2))}╯`);
-
-		const lines: string[] = ["", top];
-		for (const line of innerLines) {
-			const truncated = truncateToWidth(line, contentWidth);
-			const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)));
-			lines.push(`${style.cyan("│")}  ${truncated}${pad}${style.cyan("│")}`);
-		}
-		lines.push(bottom);
-
-		this.cached = { width, lines };
+		const inner = [
+			`${style.bold(accent("pi-lite"))} ${style.gray(`v${this.options.version}`)}`,
+			...(this.options.modelName
+				? [
+						`${style.dim("Model:     ")}${style.green(this.options.modelName)}${style.dim(this.options.mode ? ` (${this.options.mode})` : "")}`,
+					]
+				: []),
+			`${style.dim("Workspace: ")}${style.yellow(truncateStart(this.displayCwd(), Math.max(0, contentWidth - 11)))}`,
+			`${style.dim("Commands:  ")}${style.cyan("/")}${style.dim(" menu · ")}${style.cyan("/model")}${style.dim(" · ")}${style.cyan("/resume")}`,
+			style.dim("Recent:"),
+			...this.recentLines(BANNER_RECENT.narrow),
+		];
+		const lines = ["", style.gray(`╭${"─".repeat(Math.max(0, boxWidth - 2))}╮`)];
+		for (const text of inner) lines.push(`${style.gray("│")}  ${padTo(text, contentWidth)}${style.gray("│")}`);
+		lines.push(style.gray(`╰${"─".repeat(Math.max(0, boxWidth - 2))}╯`));
 		return lines;
 	}
 }

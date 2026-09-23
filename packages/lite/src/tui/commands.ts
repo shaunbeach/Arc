@@ -14,6 +14,7 @@ export type CommandName =
 	| "compact"
 	| "clear"
 	| "resume"
+	| "name"
 	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
@@ -31,7 +32,12 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 		argumentHint: "[threshold]",
 	},
 	{ name: "clear", description: "Clear the conversation and start a new session" },
-	{ name: "resume", description: "Resume a saved session from this directory", argumentHint: "[id]" },
+	{
+		name: "resume",
+		description: "Resume a saved session: its number in the banner, its /name, or its id",
+		argumentHint: "[number|name|id]",
+	},
+	{ name: "name", description: "Name this session, for the banner and /resume", argumentHint: "<text>" },
 	{ name: "quit", description: "Exit" },
 ];
 

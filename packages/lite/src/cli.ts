@@ -51,7 +51,7 @@ Options:
       --verbose               Print every request body to stderr (print mode)
   -h, --help                  Show this help
 
-Interactive commands: /agent  /plan  /chat  /web [on|off]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [id]  /quit
+Interactive commands: /agent  /plan  /chat  /web [on|off]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [number|name|id]  /name <text>  /quit
 `;
 
 function dim(text: string): string {

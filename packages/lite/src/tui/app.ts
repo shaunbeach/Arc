@@ -36,19 +36,23 @@ import {
 	type LoadedSession,
 	listSessions,
 	loadSession,
+	matchSession,
 	recordSession,
-	resolveSessionPath,
 	SessionFile,
 	type SessionSettings,
+	type SessionSummary,
+	sessionLabel,
 } from "../session.ts";
 import { createToolsForModel } from "../tools/index.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
 import {
 	type AiStatus,
 	AssistantView,
+	BANNER_RECENT,
 	BannerView,
 	formatDuration,
 	formatFooter,
+	formatSessionDate,
 	formatTokens,
 	Line,
 	ServeView,
@@ -135,6 +139,8 @@ class InteractiveApp {
 	private readonly agent: Agent;
 	private banner: BannerView | undefined;
 	private session: SessionFile | undefined;
+	/** The current session's `/name`, if any. */
+	private sessionName: string | undefined;
 	private lastReply: AssistantMessage | undefined;
 	/** The prompt size `/compact` estimated, shown in the footer until the next reply measures it. */
 	private contextEstimate: number | undefined;
@@ -192,6 +198,7 @@ class InteractiveApp {
 				: SessionFile.create(this.appDir, cwd, settings);
 		}
 		this.lastReply = options.session ? lastReplyWithUsage(options.session.messages) : undefined;
+		this.sessionName = options.session?.name;
 		this.contextEstimate = undefined;
 		recordSession(this.agent, () => this.session);
 		this.agent.subscribe((event) => this.onAgentEvent(event));
@@ -537,6 +544,9 @@ class InteractiveApp {
 				if (args) this.resumeById(args);
 				else this.pickSession();
 				return;
+			case "name":
+				this.nameSession(args);
+				return;
 			case "quit":
 				this.stop();
 				return;
@@ -564,7 +574,8 @@ class InteractiveApp {
 	private resumedNotice(id: string): string {
 		const mode = this.agent.interactionMode;
 		const inMode = mode === "agent" ? "" : ` in ${mode} mode`;
-		return `Resumed session ${id.slice(0, 8)}${inMode}${this.agent.web ? "" : ", web off"}.`;
+		const named = this.sessionName ? ` "${this.sessionName}"` : "";
+		return `Resumed session ${id.slice(0, 8)}${named}${inMode}${this.agent.web ? "" : ", web off"}.`;
 	}
 
 	/** `/web on`, `/web off`, or `/web` to switch. Applies from the next request; the session file records it. */
@@ -700,8 +711,7 @@ class InteractiveApp {
 		this.contextEstimate = undefined;
 		this.lastTurnMs = undefined;
 		this.setAiStatus("idle");
-		// The banner is at the top; rewriting it once the transcript has grown would redraw the whole screen.
-		if (this.chat.children.length === 1) this.banner?.setModel(undefined, undefined);
+		this.updateBanner(undefined, undefined);
 		if (owned) {
 			this.notice(style.gray("Disconnected: llama-server stopped."));
 		} else if (attachedTo) {
@@ -731,9 +741,7 @@ class InteractiveApp {
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		this.notice(style.gray(`Mode: ${mode}${note}`));
 		this.updateFooter();
-		if (this.chat.children.length === 1) {
-			this.banner?.setModel(this.agent.model?.name, mode);
-		}
+		this.updateBanner(this.agent.model?.name, mode);
 	}
 
 	private switchModel(query: string): void {
@@ -766,9 +774,7 @@ class InteractiveApp {
 		writeLastUsed(getAppDir(), { model: model.name, mode: this.agent.mode });
 		this.notice(style.gray(`Model: ${model.name} (${this.agent.mode})`));
 		this.updateFooter();
-		if (this.chat.children.length === 1) {
-			this.banner?.setModel(model.name, this.agent.mode);
-		}
+		this.updateBanner(model.name, this.agent.mode);
 		void this.ensureServer();
 	}
 
@@ -994,6 +1000,7 @@ class InteractiveApp {
 	private newSession(): void {
 		if (!this.requireIdle()) return;
 		this.agent.setMessages([]);
+		this.sessionName = undefined;
 		this.lastReply = undefined;
 		this.contextEstimate = undefined;
 		this.lastTurnMs = undefined;
@@ -1014,25 +1021,55 @@ class InteractiveApp {
 		this.updateFooter();
 	}
 
+	/** This directory's saved sessions, most recent first, without the one in use. */
+	private resumableSessions(): SessionSummary[] {
+		try {
+			return listSessions(this.appDir, this.options.cwd).filter((session) => session.id !== this.session?.id);
+		} catch {
+			return [];
+		}
+	}
+
 	private pickSession(): void {
 		if (!this.requireIdle()) return;
-		const sessions = listSessions(this.appDir, this.options.cwd).filter((session) => session.id !== this.session?.id);
+		const sessions = this.resumableSessions();
 		if (sessions.length === 0) {
 			this.notice(style.gray("No saved sessions for this directory."));
 			return;
 		}
 		const items = sessions.slice(0, 50).map((session) => ({
 			value: session.path,
-			label: session.preview || "(no messages)",
+			label: sessionLabel(session),
 			description: `${formatAge(session.modified)} · ${session.id.slice(0, 8)}`,
 		}));
 		this.pick("Resume session", items, (path) => this.resumePath(path));
 	}
 
+	/** `/resume 2`, `/resume toolbar`, or `/resume 1a2b`: a position in the banner's list, a `/name`, or an id. */
 	private resumeById(query: string): void {
-		const path = resolveSessionPath(this.appDir, this.options.cwd, query);
-		if (path) this.resumePath(path);
-		else this.notice(style.red(`No unique saved session matches "${query}".`));
+		const match = matchSession(this.resumableSessions(), query);
+		if ("session" in match) this.resumePath(match.session.path);
+		else this.notice(style.red(match.error));
+	}
+
+	/** `/name <text>` names the current session for the banner and `/resume`; `/name` alone shows the name. */
+	private nameSession(text: string): void {
+		const name = text.trim().replace(/\s+/g, " ");
+		if (!this.session) {
+			this.notice(
+				style.yellow("This session is not saved (no model loaded, or --no-session), so it cannot be named."),
+			);
+			return;
+		}
+		if (!name) {
+			this.notice(
+				style.gray(this.sessionName ? `This session is named "${this.sessionName}".` : "Usage: /name <text>"),
+			);
+			return;
+		}
+		this.session.setName(name);
+		this.sessionName = name;
+		this.notice(style.gray(`Session named "${name}". Resume it later with /resume ${name.split(" ")[0]}.`));
 	}
 
 	private resumePath(path: string): void {
@@ -1050,6 +1087,7 @@ class InteractiveApp {
 		const modelChanged = model?.name !== this.agent.model?.name;
 
 		this.agent.setMessages(loaded.messages);
+		this.sessionName = loaded.name;
 		this.agent.model = model;
 		this.agent.mode = savedModel && saved ? saved.mode : this.agent.mode;
 		this.agent.setInteractionMode(saved?.interactionMode ?? "agent");
@@ -1094,12 +1132,25 @@ class InteractiveApp {
 
 	// Rendering
 
+	/**
+	 * Shows a model change under the banner's logo while the banner is still on screen: before the conversation
+	 * starts, only a few notices sit below it. Later it has scrolled up, and rewriting lines above the screen would
+	 * make the renderer redraw everything and clear the scrollback, so it keeps what it showed.
+	 */
+	private updateBanner(modelName: string | undefined, mode: string | undefined): void {
+		if (this.agent.messages.length === 0) this.banner?.setModel(modelName, mode);
+	}
+
 	private showHeader(): void {
 		this.banner = new BannerView({
 			version: this.options.version ?? "0.0.1",
 			cwd: this.options.cwd,
 			modelName: this.agent.model?.name,
 			mode: this.agent.model ? this.agent.mode : undefined,
+			// The same list, in the same order, that `/resume 1` picks from.
+			recent: this.resumableSessions()
+				.slice(0, BANNER_RECENT.wide)
+				.map((session) => ({ when: formatSessionDate(session.modified), label: sessionLabel(session) })),
 		});
 		this.chat.addChild(this.banner);
 	}

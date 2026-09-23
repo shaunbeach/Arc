@@ -6,6 +6,7 @@ import type { AssistantMessage, UserMessage } from "../src/llm/types.ts";
 import {
 	listSessions,
 	loadSession,
+	matchSession,
 	resolveSessionPath,
 	SessionFile,
 	type SessionSettings,
@@ -162,5 +163,40 @@ describe("listing sessions", () => {
 	it("keeps directories with the same name apart", () => {
 		expect(sessionDirectory("/app", "/a/project")).not.toBe(sessionDirectory("/app", "/b/project"));
 		expect(sessionDirectory("/app", "/a/project")).toMatch(/\/app\/sessions\/project-[0-9a-f]{8}$/);
+	});
+});
+
+describe("naming and matching sessions", () => {
+	it("keeps a name given before the first message, and the latest name after", () => {
+		const dir = appDir();
+		const file = SessionFile.create(dir, "/work/project", settings);
+		file.setName("toolbar phase");
+		expect(existsSync(file.path)).toBe(false);
+		file.appendMessage(user("build the toolbar"));
+		expect(loadSession(file.path).name).toBe("toolbar phase");
+		file.appendMessage(user("x".repeat(100_000)));
+		file.setName("toolbar and shortcuts");
+		file.appendMessage(user("more"));
+		expect(loadSession(file.path).name).toBe("toolbar and shortcuts");
+		expect(listSessions(dir, "/work/project")[0]).toMatchObject({
+			name: "toolbar and shortcuts",
+			preview: "build the toolbar",
+		});
+	});
+
+	it("resumes by position, id prefix, or part of a name, and says why not", () => {
+		const sessions = [
+			{ id: "aaaa1111", path: "/a", modified: new Date(), bytes: 1, preview: "first", name: "Toolbar phase" },
+			{ id: "bbbb2222", path: "/b", modified: new Date(), bytes: 1, preview: "second" },
+			{ id: "cccc3333", path: "/c", modified: new Date(), bytes: 1, preview: "third", name: "tool picker" },
+		];
+		expect(matchSession(sessions, "2")).toMatchObject({ session: { path: "/b" } });
+		expect(matchSession(sessions, "cccc")).toMatchObject({ session: { path: "/c" } });
+		expect(matchSession(sessions, "toolbar")).toMatchObject({ session: { path: "/a" } });
+		expect(matchSession(sessions, "tool")).toEqual({
+			error: '"tool" matches more than one session. Use more of it.',
+		});
+		expect(matchSession(sessions, "9")).toEqual({ error: "There is no session 9; 3 saved here." });
+		expect(matchSession(sessions, "nothing")).toEqual({ error: 'No saved session matches "nothing".' });
 	});
 });

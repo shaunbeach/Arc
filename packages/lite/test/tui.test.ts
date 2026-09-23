@@ -8,11 +8,13 @@ import {
 	BannerView,
 	describeToolCall,
 	formatFooter,
+	formatSessionDate,
 	formatTokens,
 	Line,
 	ServeView,
 	ToolView,
 } from "../src/tui/components.ts";
+import { accent, logoColors, renderLogo } from "../src/tui/logo.ts";
 
 const WIDTH = 60;
 const plainLines = (component: { render(width: number): string[] }, width = WIDTH) =>
@@ -240,56 +242,121 @@ describe("commands", () => {
 });
 
 describe("BannerView", () => {
-	it("renders boxed banner with version, model, workspace, and hints", () => {
-		const banner = new BannerView({
-			version: "1.0.0",
-			cwd: "/srv/app",
-			modelName: "Qwen-27B",
-			mode: "thinking",
-		});
-		const lines = plainLines(banner, 80);
+	const recent = [
+		{ when: "today 3:05 AM", label: "Compare Opus 5.5 and GPT-6 Astra" },
+		{ when: "yesterday 9:12 PM", label: "Fix the failing highlight tests" },
+		{ when: "Sep 20", label: "toolbar phase" },
+		{ when: "Sep 19", label: "fourth" },
+		{ when: "Sep 18", label: "fifth" },
+		{ when: "Sep 17", label: "sixth" },
+	];
+	const banner = (extra: Partial<ConstructorParameters<typeof BannerView>[0]> = {}) =>
+		new BannerView({ version: "1.0.0", cwd: "/srv/app", modelName: "Qwen-27B", mode: "thinking", recent, ...extra });
+
+	it("puts the logo and model on the left, and commands, workspace, and sessions on the right", () => {
+		const lines = plainLines(banner(), 100);
 		expect(lines[0]).toBe("");
-		expect(lines[1]).toContain("╭");
-		expect(lines.some((line) => line.includes("⚡ Pi-Lite CLI v1.0.0"))).toBe(true);
-		expect(lines.some((line) => line.includes("Model:     Qwen-27B (thinking)"))).toBe(true);
-		expect(lines.some((line) => line.includes("Workspace: /srv/app"))).toBe(true);
-		expect(lines.some((line) => line.includes("Commands:  type / for menu, /model to select"))).toBe(true);
-		expect(lines[lines.length - 1]).toContain("╰");
+		expect(lines[1]).toMatch(/^╭─ pi-lite v1\.0\.0 ─+╮$/);
+		expect(lines.at(-1)).toMatch(/^╰─+╯$/);
+		const body = lines.slice(2, -1);
+		expect(body.every((line) => /^│.{24}│ .* │$/.test(line))).toBe(true);
+		expect(body.some((line) => /^│ +Qwen-27B +│/.test(line))).toBe(true);
+		// Right column: after "│" + 24 columns + "│ ", before " │".
+		const right = body.map((line) => line.slice(27, -2).trimEnd());
+		expect(right.slice(0, 9)).toEqual([
+			"Commands",
+			"/ for the command menu · /model to pick a model",
+			"/resume to continue a session · /name to name this one",
+			expect.stringMatching(/^─+/),
+			"Workspace",
+			"/srv/app",
+			expect.stringMatching(/^─+/),
+			"Recent sessions",
+			"1  today 3:05 AM      Compare Opus 5.5 and GPT-6 Astra",
+		]);
+		// Five sessions fit beside the logo; the sixth is left for /resume.
+		expect(right.filter((line) => /^\d {2}/.test(line)).map((line) => line[0])).toEqual(["1", "2", "3", "4", "5"]);
+		// Every line is the box's width, so its edges line up.
+		expect(new Set(lines.slice(1).map((line) => visibleWidth(line))).size).toBe(1);
 	});
 
-	it("omits model line when modelName is not provided", () => {
-		const banner = new BannerView({
-			version: "1.0.0",
-			cwd: "/srv/app",
-		});
-		const lines = plainLines(banner, 80);
-		expect(lines.some((line) => line.includes("Model:"))).toBe(false);
+	it("follows omp's colors: a gray frame, plain version text, and sky-blue headings", () => {
+		const raw = banner().render(100);
+		expect(raw[1].startsWith("\x1b[90m╭─\x1b[39m pi-lite v1.0.0 \x1b[90m─")).toBe(true);
+		expect(raw[2].startsWith("\x1b[90m│\x1b[39m")).toBe(true);
+		const commands = raw.find((line) => line.includes("Commands")) ?? "";
+		expect(commands).toContain(`\x1b[1m${accent("Commands")}\x1b[22m`);
+		expect(accent("x", "truecolor")).toBe("\x1b[38;2;79;168;240mx\x1b[39m");
+		expect(accent("x", "256")).toMatch(/^\x1b\[38;5;\d+mx\x1b\[39m$/);
+		expect(accent("x", "none")).toBe("x");
+	});
+
+	it("keeps three sessions and one column on a narrow terminal", () => {
+		const lines = plainLines(banner(), 60);
+		expect(lines.some((line) => /[▀▄█]/.test(line))).toBe(false);
+		expect(lines.filter((line) => /│ {2}\d {2}/.test(line))).toHaveLength(3);
+		expect(lines.some((line) => line.includes("Workspace: /srv/app"))).toBe(true);
+	});
+
+	it("says so when this workspace has no saved sessions, and no model is loaded", () => {
+		const lines = plainLines(banner({ recent: [], modelName: undefined, mode: undefined }), 100);
+		expect(lines.some((line) => line.includes("No saved sessions in this workspace yet"))).toBe(true);
+		expect(lines.some((line) => /^│ +no model +│/.test(line))).toBe(true);
 	});
 
 	it("updates when setModel and setCwd are called", () => {
-		const banner = new BannerView({
-			version: "1.0.0",
-			cwd: "/srv/app",
-		});
-		banner.setModel("New-Model", "instruct");
-		banner.setCwd("/srv/other");
-		const lines = plainLines(banner, 80);
-		expect(lines.some((line) => line.includes("Model:     New-Model (instruct)"))).toBe(true);
-		expect(lines.some((line) => line.includes("Workspace: /srv/other"))).toBe(true);
+		const view = banner({ modelName: undefined });
+		view.setModel("New-Model", "instruct");
+		view.setCwd("/srv/other");
+		const lines = plainLines(view, 100);
+		expect(lines.some((line) => /^│ +New-Model +│/.test(line))).toBe(true);
+		expect(lines.some((line) => line.includes("/srv/other"))).toBe(true);
 	});
 
 	it("never exceeds terminal width", () => {
-		const banner = new BannerView({
-			version: "1.0.0",
-			cwd: "/a/very/long/path/that/might/exceed/terminal/width/easily/on/a/narrow/terminal",
+		const view = banner({
+			cwd: "/a/very/long/path/that/might/exceed/terminal/width/easily/on/a/narrow/terminal/and/more",
 			modelName: "VeryLongModelName-ExtraLong-Reasoning-Special",
-			mode: "thinking",
+			recent: [{ when: "yesterday 11:59 PM", label: "x".repeat(200) }],
 		});
-		for (const w of [30, 40, 50, 60, 80, 120]) {
-			for (const line of banner.render(w)) {
-				expect(visibleWidth(line)).toBeLessThanOrEqual(w);
-			}
+		for (const w of [30, 40, 50, 60, 71, 72, 80, 100, 160]) {
+			for (const line of view.render(w)) expect(visibleWidth(line)).toBeLessThanOrEqual(w);
 		}
+		// A long path keeps its end, where the project's name is.
+		expect(plainLines(view, 80).some((line) => line.includes("…") && line.includes("/and/more"))).toBe(true);
+	});
+
+	it("describes when a session was used", () => {
+		const now = new Date(2026, 8, 23, 15, 0);
+		const time = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+		const at = (day: number, h: number, m: number) => new Date(2026, 8, day, h, m);
+		expect(formatSessionDate(at(23, 3, 5), now)).toBe(`today ${time(at(23, 3, 5))}`);
+		expect(formatSessionDate(at(22, 21, 12), now)).toBe(`yesterday ${time(at(22, 21, 12))}`);
+		expect(formatSessionDate(at(19, 8, 0), now)).toMatch(new RegExp(`^\\S+ ${time(at(19, 8, 0))}$`));
+		expect(formatSessionDate(at(10, 8, 0), now)).toBe(
+			at(10, 8, 0).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+		);
+		expect(formatSessionDate(new Date(2025, 8, 10), now)).toContain("2025");
+	});
+});
+
+describe("logo", () => {
+	it("is 12 lines of 14 columns in any color mode", () => {
+		for (const colors of ["truecolor", "256", "none"] as const) {
+			const lines = renderLogo(colors);
+			expect(lines).toHaveLength(12);
+			for (const line of lines) expect(visibleWidth(line)).toBe(14);
+		}
+	});
+
+	it("uses 24-bit color only when the terminal says so, and no color with NO_COLOR", () => {
+		expect(logoColors({ COLORTERM: "truecolor" })).toBe("truecolor");
+		expect(logoColors({ COLORTERM: "24bit" })).toBe("truecolor");
+		expect(logoColors({})).toBe("256");
+		expect(logoColors({ COLORTERM: "truecolor", NO_COLOR: "1" })).toBe("none");
+		expect(renderLogo("truecolor").join("")).toMatch(/\x1b\[38;2;\d+;\d+;\d+m/);
+		expect(renderLogo("256").join("")).toMatch(/\x1b\[38;5;\d+m/);
+		expect(renderLogo("none").join("")).not.toContain("\x1b");
 	});
 });
 
