@@ -99,7 +99,7 @@ An interactive session starts without a model; `/model` opens a picker, and a me
 | `/compact [threshold]` | Ask the model which old tool results it still needs, and cut the rest. See [Context window](#context-window). |
 | `/serve [name]` | Host a model for other machines. See [Hosting](#hosting). |
 | `/disconnect` | Stop llama-server and unload the model without exiting. |
-| `/new` | Start a new session (also `/clear`, `/cls`, `/reset`). |
+| `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [id]` | Resume a saved session. Without an id, opens a picker. |
 | `/quit` | Exit. |
 
@@ -120,7 +120,7 @@ Messages typed while the model works are sent with its next turn. The footer sho
 | plan | read, web_search, web_fetch | research the project and write a plan, without changing files |
 | chat | web_search, web_fetch | talk, look things up |
 
-Each mode has its own system prompt. The mode and the `/web` setting are saved with the session, so `-c` resumes where you left off; `/new` starts again in agent mode with the web tools on.
+Each mode has its own system prompt. The mode and the `/web` setting are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on.
 
 ## Web tools
 
@@ -139,12 +139,12 @@ Each mode has its own system prompt. The mode and the `/web` setting are saved w
 
 ## Memory guard
 
-When memory runs short, the system moves it to swap on disk, and a model that keeps growing slows everything down. The guard stops the model's server when swap passes a limit, so the memory is freed:
+When memory runs short, the system moves it to swap on disk, and a model that keeps growing slows everything down. The guard stops the model's server when swap passes a limit and less than 10% of memory is free, so the memory is freed:
 
 - **While hosting**, always, at 4.5 GB unless `--max-swap` sets another limit. It waits for requests in progress, stops the server, waits 15 s, and starts it again.
 - **In chat and agent work**, only with `--max-swap` (`4.5`, `4.5GB`, `512MB`). It checks after each reply; the server starts again with the next message.
 
-Swap counts every application. When stopping the server does not bring it under the limit, other applications hold it, and the guard pauses until swap drops rather than reload the model again and again.
+Swap alone would mislead it: the system takes pages back from swap only when their owner uses them again, so the figure stays high after the server stops. Free memory comes back at once. When it does not, other applications hold the memory, and the guard pauses until it is free again rather than reload the model again and again.
 
 ## Context window
 
