@@ -186,6 +186,73 @@ describe("LlamaServerManager", () => {
 		expect(manager.ownsServer).toBe(false);
 	});
 
+	it("never spawns for a discovered model, and says the link is down", async () => {
+		let spawned = false;
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				spawned = true;
+				return new FakeChild("llama-server") as unknown as ChildProcess;
+			},
+			// Nothing is listening: the tunnel is down, or the other machine is asleep.
+			fetch: (async () => {
+				throw new Error("ECONNREFUSED");
+			}) as unknown as typeof fetch,
+		});
+		const discovered: LiteModel = { ...model, discover: true, modelPath: "/Users/someone/elsewhere.gguf" };
+		await expect(manager.ensure(discovered)).rejects.toThrow(/Nothing is serving at http:\/\/127\.0\.0\.1:8080/);
+		expect(spawned).toBe(false);
+	});
+
+	it("distinguishes a lost connection from one that never answered", async () => {
+		let reachable = true;
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: (async (url: string) => {
+				if (!reachable) throw new Error("ECONNREFUSED");
+				return new URL(url).pathname === "/props"
+					? Response.json({ model_path: "/models/test.gguf" })
+					: new Response("{}", { status: 200 });
+			}) as unknown as typeof fetch,
+		});
+		const discovered: LiteModel = { ...model, discover: true };
+		await manager.ensure(discovered);
+
+		// The other machine goes away after pi-lite had been talking to it.
+		reachable = false;
+		await expect(manager.ensure(discovered)).rejects.toThrow(/Lost the connection to http:\/\/127\.0\.0\.1:8080/);
+		// A fresh manager never reached it, so it reads as nothing being there.
+		const cold = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: (async () => {
+				throw new Error("ECONNREFUSED");
+			}) as unknown as typeof fetch,
+		});
+		await expect(cold.ensure(discovered)).rejects.toThrow(/Nothing is serving at/);
+	});
+
+	it("attaches a discovered model to the server that is already running", async () => {
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: routes((path) =>
+				path === "/props"
+					? Response.json({ model_path: "/models/test.gguf" })
+					: new Response("{}", { status: 200 }),
+			),
+		});
+		await manager.ensure({ ...model, discover: true });
+		expect(manager.ownsServer).toBe(false);
+	});
+
 	it("refuses a running server that serves another model", async () => {
 		const manager = new LlamaServerManager({
 			logFile: logFile(),

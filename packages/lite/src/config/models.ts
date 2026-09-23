@@ -11,8 +11,22 @@ import {
 } from "./sampling.ts";
 
 export interface LiteModel {
-	/** models.yml `name` (falls back to `id`). Unique; used for lookup and display. */
+	/** models.yml `name` (falls back to `id`). Unique; the stable handle for lookup, last-used, and sessions. */
 	name: string;
+	/**
+	 * What to show instead of `name` once a `discover` entry has been connected: the GGUF the server turned out to
+	 * be running. Undefined for an ordinary entry, which shows its `name`.
+	 */
+	displayName?: string;
+	/**
+	 * `discover: true`: a placeholder for whatever llama-server is already running at `baseUrl`. Its real fields
+	 * arrive from `/props` at connect time, and pi-lite never spawns a server for it.
+	 */
+	discover?: boolean;
+	/** `maxTokens` as written in models.yml, so discovery can tell an explicit value from the default. */
+	configuredMaxTokens?: number;
+	/** llama-server's `build_info`, when a discovered server reported one. */
+	buildInfo?: string;
 	/** models.yml `id`: the GGUF path, relative to `modelDir` unless absolute. */
 	id: string;
 	/** Key under `providers:` that defined this model. */
@@ -31,6 +45,11 @@ export interface LiteModel {
 	llamaServer: string;
 	defaultMode?: SamplingMode;
 	sampling?: SamplingOverrides;
+}
+
+/** What to call a model on screen: the GGUF a `discover` entry connected to, else its models.yml name. */
+export function modelLabel(model: LiteModel): string {
+	return model.displayName ?? model.name;
 }
 
 export interface ModelsConfig {
@@ -81,8 +100,6 @@ export function loadModelsConfig(path: string, env: NodeJS.ProcessEnv = process.
 
 export interface ParseModelsOptions {
 	env?: NodeJS.ProcessEnv;
-	/** Injectable for tests. Default: `fs.existsSync`. */
-	fileExists?: (path: string) => boolean;
 }
 
 type YamlRecord = Record<string, unknown>;
@@ -124,7 +141,6 @@ export function hasFlag(args: readonly string[], flags: readonly string[]): bool
  */
 export function parseModelsConfig(text: string, path: string, options: ParseModelsOptions = {}): ModelsConfig {
 	const env = options.env ?? process.env;
-	const fileExists = options.fileExists ?? existsSync;
 	const configError = (key: string, problem: string) => new ModelsConfigError(`${path}: ${key} ${problem}`);
 
 	const readString = (record: YamlRecord, key: string, at: string): string | undefined => {
@@ -234,6 +250,43 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 		const modelDir = modelDirText === undefined ? undefined : resolve(configDir, expandHome(modelDirText));
 		const llamaServer = readString(provider, "llamaServer", at) ?? env.LLAMA_SERVER ?? "llama-server";
 
+		const providerMode = readString(provider, "mode", at);
+		if (providerMode !== undefined && !isSamplingMode(providerMode)) {
+			throw configError(`${at}.mode`, `must be ${SAMPLING_MODES.join(" or ")}`);
+		}
+
+		// `discover: true`: one placeholder standing for whatever the server at baseUrl is already running. Its
+		// fields are filled from /props on connect, so models.yml says nothing about the model itself.
+		if (readBoolean(provider, "discover", at) === true) {
+			if (provider.models !== undefined) {
+				throw configError(`${at}.models`, "is not allowed with discover: true; the running server names the model");
+			}
+			const name = readString(provider, "name", at) ?? providerName;
+			if (models.some((model) => model.name === name)) {
+				throw configError(`${at}.name`, `duplicates another model named "${name}"`);
+			}
+			models.push({
+				name,
+				discover: true,
+				id: "",
+				provider: providerName,
+				baseUrl: baseUrl.href.replace(/\/+$/, ""),
+				apiKey,
+				reasoning: false,
+				input: ["text"],
+				// Replaced from /props before anything is sent. Nothing reads these while unconnected.
+				contextWindow: 4096,
+				maxTokens: 1024,
+				configuredMaxTokens: readPositiveInt(provider, "maxTokens", at),
+				modelPath: "",
+				launchArgs: [],
+				llamaServer,
+				defaultMode: providerMode,
+				sampling: readSamplingOverrides(provider.sampling, `${at}.sampling`),
+			});
+			continue;
+		}
+
 		const rawModels = provider.models;
 		if (!Array.isArray(rawModels) || rawModels.length === 0)
 			throw configError(`${at}.models`, "must be a non-empty list");
@@ -275,7 +328,6 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 			if (isAbsolute(expandedId)) modelPath = expandedId;
 			else if (modelDir) modelPath = join(modelDir, expandedId);
 			else throw configError(`${modelAt}.id`, `is a relative path but ${at}.modelDir is not set`);
-			if (!fileExists(modelPath)) warnings.push(`${name}: model file not found: ${modelPath}`);
 
 			const urlPort = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
 			const port = flagValue(launchArgs, ["--port"]);

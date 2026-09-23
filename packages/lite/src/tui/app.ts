@@ -15,10 +15,11 @@ import {
 import { Agent } from "../agent/agent.ts";
 import type { AgentEvent } from "../agent/types.ts";
 import { writeLastUsed } from "../config/last-used.ts";
-import { findModel, type LiteModel, type ModelsConfig } from "../config/models.ts";
+import { findModel, type LiteModel, type ModelsConfig, modelLabel } from "../config/models.ts";
 import { getAppDir } from "../config/paths.ts";
 import { defaultSamplingMode, type SamplingMode } from "../config/sampling.ts";
 import { describeTrim } from "../context.ts";
+import { fetchServerProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
 import { getLocalIpAddress, type LlamaServerManager, serverOrigin, serverPort } from "../llm/server.ts";
 import {
 	DEFAULT_SWAP_THRESHOLD_BYTES,
@@ -233,6 +234,8 @@ class InteractiveApp {
 			this.notice(style.gray(this.resumedNotice(this.options.session.header.id)));
 		}
 		this.updateFooter();
+		// Only for a discover entry: an ordinary model still waits for the first prompt to start its server.
+		if (this.agent.model && isUnresolved(this.agent.model)) void this.ensureServer();
 		if (this.options.pickSession) this.pickSession();
 		else if (this.options.serveModel !== undefined) {
 			this.serveModel(this.options.serveModel);
@@ -415,11 +418,19 @@ class InteractiveApp {
 
 	// llama-server
 
-	/** Make the current model's server ready, after any startup already in progress. False if it failed or was aborted. */
+	/**
+	 * Make the current model's server ready, after any startup already in progress. False if it failed or was
+	 * aborted. An unresolved `discover` placeholder is connected first, so every route to a prompt -- `-m mac`,
+	 * a resumed session, `/model mac` -- goes through the same step.
+	 */
 	private ensureServer(): Promise<boolean> {
-		const model = this.agent.model;
-		if (!model) return Promise.resolve(false);
-		this.serverTask = this.serverTask.then(() => (this.agent.model ? this.startServer(this.agent.model) : false));
+		if (!this.agent.model) return Promise.resolve(false);
+		this.serverTask = this.serverTask.then(async () => {
+			const model = this.agent.model;
+			if (!model) return false;
+			if (isUnresolved(model) && !(await this.resolveDiscovered(model))) return false;
+			return this.agent.model ? this.startServer(this.agent.model) : false;
+		});
 		return this.serverTask;
 	}
 
@@ -437,7 +448,7 @@ class InteractiveApp {
 			this.notice(
 				controller.signal.aborted
 					? style.gray("Model loading aborted.")
-					: style.red(`llama-server: ${errorText(error)}`),
+					: style.red(model.discover ? errorText(error) : `llama-server: ${errorText(error)}`),
 			);
 			return false;
 		} finally {
@@ -756,10 +767,40 @@ class InteractiveApp {
 
 	private applyModel(model: LiteModel): void {
 		if (!this.requireIdle()) return;
-		if (model.name === this.agent.model?.name) {
-			this.notice(style.gray(`Already using ${model.name}.`));
+		if (model.name === this.agent.model?.name && !model.discover) {
+			this.notice(style.gray(`Already using ${modelLabel(this.agent.model)}.`));
 			return;
 		}
+		this.adoptModel(model);
+		void this.ensureServer();
+	}
+
+	/**
+	 * Ask the server at the placeholder's baseUrl what it is running, then adopt that. The model, its window, and
+	 * whether it takes images all come from the reply, so models.yml never has to describe a machine it cannot see.
+	 */
+	private async resolveDiscovered(placeholder: LiteModel): Promise<boolean> {
+		const origin = serverOrigin(placeholder.baseUrl);
+		this.setAiStatus("working");
+		this.setStatus(`Asking ${origin} what it is running`);
+		try {
+			const props = await fetchServerProps(placeholder.baseUrl, undefined, AbortSignal.timeout(10_000));
+			if (!props) {
+				this.notice(style.red(`Nothing is serving at ${origin}. Start llama-server there, then try again.`));
+				return false;
+			}
+			const model = resolveDiscoveredModel(placeholder, props);
+			this.adoptModel(model);
+			this.notice(style.gray(describeDiscovered(model, props, origin)));
+			return true;
+		} finally {
+			this.setStatus(undefined);
+			if (!this.agent.isRunning) this.setAiStatus("idle");
+		}
+	}
+
+	/** Everything that changes when a model becomes the current one, once it is fully known. */
+	private adoptModel(model: LiteModel): void {
 		this.agent.model = model;
 		this.agent.mode = defaultSamplingMode(model);
 		this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
@@ -772,18 +813,19 @@ class InteractiveApp {
 			this.session?.updateSettings(this.sessionSettings(model));
 		}
 		writeLastUsed(getAppDir(), { model: model.name, mode: this.agent.mode });
-		this.notice(style.gray(`Model: ${model.name} (${this.agent.mode})`));
+		if (!model.discover) this.notice(style.gray(`Model: ${modelLabel(model)} (${this.agent.mode})`));
 		this.updateFooter();
-		this.updateBanner(model.name, this.agent.mode);
-		void this.ensureServer();
+		this.updateBanner(modelLabel(model), this.agent.mode);
 	}
 
 	private pickModel(): void {
 		const current = this.agent.model?.name;
 		const items = this.options.config.models.map((model) => ({
 			value: model.name,
-			label: current && model.name === current ? `${model.name} (current)` : model.name,
-			description: `${defaultSamplingMode(model)} · ctx ${formatTokens(model.contextWindow)}`,
+			label: current && model.name === current ? `${modelLabel(this.agent.model ?? model)} (current)` : model.name,
+			description: model.discover
+				? `connect to whatever ${serverOrigin(model.baseUrl)} is running`
+				: `${defaultSamplingMode(model)} · ctx ${formatTokens(model.contextWindow)}`,
 		}));
 		this.pick(current ? "Switch model" : "Select model", items, (name) => {
 			const model = findModel(this.options.config.models, name);
@@ -798,9 +840,10 @@ class InteractiveApp {
 		}
 		if (!this.requireIdle()) return;
 
-		const models = this.options.config.models;
+		// Hosting runs llama-server here, which needs a GGUF on this machine: a discover entry has neither.
+		const models = this.options.config.models.filter((model) => !model.discover);
 		if (models.length === 0) {
-			this.notice(style.red("No models found in models.yml to serve."));
+			this.notice(style.red("No models in models.yml can be served from this machine."));
 			return;
 		}
 
@@ -1253,6 +1296,25 @@ class InteractiveApp {
 		clearInterval(this.statusTimer);
 		this.tui.stop();
 	}
+}
+
+/** A `discover` entry that has not been connected yet: it still names no GGUF. */
+function isUnresolved(model: LiteModel): boolean {
+	return model.discover === true && model.modelPath === "";
+}
+
+/**
+ * What a fresh connection found, for the line printed under `/model`: the GGUF, where it is, and the facts that
+ * change how pi-lite talks to it.
+ */
+function describeDiscovered(model: LiteModel, props: ServerProps, origin: string): string {
+	const facts = [`ctx ${formatTokens(model.contextWindow)}`, `reply ${formatTokens(model.maxTokens)}`];
+	if (props.reasoning) facts.push("thinking");
+	if (props.vision) facts.push("vision");
+	if (props.reasoningEffort) facts.push("reasoning effort");
+	if (!props.tools) facts.push("no tool support");
+	if (props.buildInfo) facts.push(props.buildInfo);
+	return `Connected to ${modelLabel(model)} at ${origin} · ${facts.join(" · ")}`;
 }
 
 /** Run the interactive UI until the user quits. The caller stops llama-server afterwards. */

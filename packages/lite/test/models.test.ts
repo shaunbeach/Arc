@@ -33,11 +33,14 @@ ask:
     zimFolder: /somewhere
 `;
 
-function parse(text: string, options: { exists?: boolean; env?: NodeJS.ProcessEnv } = {}) {
-	return parseModelsConfig(text, "/cfg/models.yml", {
-		env: options.env ?? {},
-		fileExists: () => options.exists ?? true,
-	});
+function parse(text: string, options: { env?: NodeJS.ProcessEnv } = {}) {
+	return parseModelsConfig(text, "/cfg/models.yml", { env: options.env ?? {} });
+}
+
+/** Add another provider to CONFIG's `providers:` block, before the unrelated top-level key. */
+function withProvider(yaml: string): string {
+	expect(CONFIG).toContain("\nask:");
+	return CONFIG.replace("\nask:", `${yaml}\nask:`);
 }
 
 /** Replace one line of CONFIG, failing loudly if the line is not there. */
@@ -70,15 +73,69 @@ describe("parseModelsConfig", () => {
 		expect(models[1].sampling).toEqual({ thinking: { temperature: 0.6, extra: { thinking_budget_tokens: 2048 } } });
 	});
 
-	it("warns about the api field, a port mismatch, a small ctx-size, and missing files", () => {
-		const { warnings } = parse(CONFIG, { exists: false });
+	it("warns about the api field, a port mismatch, and a small ctx-size", () => {
+		const { warnings } = parse(CONFIG);
 		expect(warnings).toEqual([
 			'providers.llamacpp.api is "openai-responses"; pi-lite always uses /v1/chat/completions.',
-			"Qwen3-4B-Instruct: model file not found: /models/Qwen3-4B-Instruct-2507/Qwen3-4B-Instruct-2507.gguf",
-			"Qwen3.5-4B-Q6_K: model file not found: /models/Qwen3.5-4B/Qwen3.5-4B-Q6_K.gguf",
 			"Qwen3.5-4B-Q6_K: launchArgs --port 8081 does not match baseUrl port 8080.",
 			"Qwen3.5-4B-Q6_K: launchArgs --ctx-size 16384 is smaller than contextWindow 32768.",
 		]);
+	});
+
+	it("does not warn about a model file that is not on this machine", () => {
+		// Remote entries name paths on another machine; a path that is wrong locally fails at load
+		// time with llama-server's own error, which names the file.
+		expect(parse(CONFIG).warnings).not.toContainEqual(expect.stringContaining("not found"));
+	});
+
+	it("reads a discover provider as one placeholder with no models list", () => {
+		const text = withProvider(`  mac:
+    baseUrl: http://localhost:8081/v1
+    auth: none
+    discover: true
+`);
+		const model = parse(text).models.at(-1);
+		expect(model?.name).toBe("mac");
+		expect(model?.discover).toBe(true);
+		expect(model?.baseUrl).toBe("http://localhost:8081/v1");
+		// Nothing about the model is known until something is serving there.
+		expect(model?.modelPath).toBe("");
+		expect(model?.launchArgs).toEqual([]);
+		expect(model?.configuredMaxTokens).toBeUndefined();
+	});
+
+	it("names a discover provider with name, and carries mode and maxTokens", () => {
+		const text = withProvider(`  mac:
+    baseUrl: http://localhost:8081/v1
+    discover: true
+    name: remote
+    mode: instruct
+    maxTokens: 4096
+`);
+		const model = parse(text).models.at(-1);
+		expect(model?.name).toBe("remote");
+		expect(model?.defaultMode).toBe("instruct");
+		expect(model?.configuredMaxTokens).toBe(4096);
+	});
+
+	it("rejects a discover provider that also lists models", () => {
+		const text = withProvider(`  mac:
+    baseUrl: http://localhost:8081/v1
+    discover: true
+    models:
+      - id: a.gguf
+        contextWindow: 4096
+`);
+		expect(() => parse(text)).toThrow(/discover: true/);
+	});
+
+	it("rejects a discover provider whose name is already taken", () => {
+		const text = withProvider(`  mac:
+    baseUrl: http://localhost:8081/v1
+    discover: true
+    name: Qwen3-4B-Instruct
+`);
+		expect(() => parse(text)).toThrow(/duplicates another model/);
 	});
 
 	it("resolves an apiKey from the environment unless auth is none", () => {

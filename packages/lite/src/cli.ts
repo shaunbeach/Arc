@@ -6,13 +6,14 @@ import pkg from "../package.json" with { type: "json" };
 import { Agent } from "./agent/agent.ts";
 import type { AgentEvent, StreamFn } from "./agent/types.ts";
 import { readLastUsed, writeLastUsed } from "./config/last-used.ts";
-import { findModel, findModelsFile, type LiteModel, loadModelsConfig } from "./config/models.ts";
+import { findModel, findModelsFile, type LiteModel, loadModelsConfig, modelLabel } from "./config/models.ts";
 import { getAppDir } from "./config/paths.ts";
 import { defaultSamplingMode, isSamplingMode, type SamplingMode } from "./config/sampling.ts";
 import { STARTER_MODELS_YML } from "./config/starter.ts";
 import { describeTrim } from "./context.ts";
+import { fetchServerProps, resolveDiscoveredModel } from "./llm/discover.ts";
 import { buildRequestBody, streamChat, toChatTools } from "./llm/llama-client.ts";
-import { LlamaServerManager, stopServerOnExit } from "./llm/server.ts";
+import { LlamaServerManager, serverOrigin, stopServerOnExit } from "./llm/server.ts";
 import { parseSwapLimit } from "./llm/swap-monitor.ts";
 import type { AssistantMessage } from "./llm/types.ts";
 import { buildSystemPrompt, estimateFixedPromptTokens } from "./prompt.ts";
@@ -90,6 +91,23 @@ function showPrompt(model: LiteModel): void {
 	);
 }
 
+/**
+ * A `discover: true` entry names no model of its own, so ask the server what it is running before anything uses
+ * its window or capabilities. Other entries pass straight through.
+ */
+async function connectModel(model: LiteModel, status: (message: string) => void): Promise<LiteModel> {
+	if (!model.discover) return model;
+	const origin = serverOrigin(model.baseUrl);
+	status(`Asking ${origin} what it is running`);
+	const props = await fetchServerProps(model.baseUrl, undefined, AbortSignal.timeout(10_000));
+	if (!props) {
+		throw new Error(`Nothing is serving at ${origin}. Start llama-server there, then try again.`);
+	}
+	const resolved = resolveDiscoveredModel(model, props);
+	status(`Connected to ${modelLabel(resolved)} · ctx ${resolved.contextWindow}`);
+	return resolved;
+}
+
 /** Print mode output: reply text on stdout; reasoning, tool activity, and notices dimmed on stderr. */
 function printEvent(event: AgentEvent): void {
 	switch (event.type) {
@@ -134,11 +152,16 @@ interface PrintOptions {
 	session: LoadedSession | undefined;
 	saveSessions: boolean;
 	verbose: boolean;
+	/** False when `mode` is only the placeholder's default, so discovery may override it. */
+	modeChosen: boolean;
 }
 
 async function runPrint(options: PrintOptions): Promise<number> {
-	const { model, mode, cwd, session } = options;
+	const { cwd, session } = options;
 	const status = (message: string) => process.stderr.write(`${dim(message)}\n`);
+	const model = await connectModel(options.model, status);
+	// A placeholder reports no thinking support, so its default mode is meaningless until it resolves.
+	const mode = options.modeChosen || model === options.model ? options.mode : defaultSamplingMode(model);
 	await options.manager.ensure(model, { onStatus: status });
 
 	const logRequests: StreamFn = (requestModel, context, requestOptions) => {
@@ -174,7 +197,7 @@ async function runPrint(options: PrintOptions): Promise<number> {
 	const output = replies.reduce((sum, reply) => sum + reply.usage.completionTokens, 0);
 	const speed = last.timings ? ` · ${last.timings.predictedPerSecond.toFixed(1)} tok/s` : "";
 	status(
-		`[${model.name} · ${mode}] ${replies.length} requests · last prompt ${last.usage.promptTokens} (cached ${last.usage.cachedTokens}) · output ${output}${speed} · took ${formatDuration(elapsedMs)} · ${last.stopReason}`,
+		`[${modelLabel(model)} · ${mode}] ${replies.length} requests · last prompt ${last.usage.promptTokens} (cached ${last.usage.cachedTokens}) · output ${output}${speed} · took ${formatDuration(elapsedMs)} · ${last.stopReason}`,
 	);
 	return 0;
 }
@@ -230,9 +253,11 @@ async function main(argv: string[]): Promise<number> {
 	if (values["list-models"]) {
 		const opens = lastModel ?? config.models[0];
 		for (const model of config.models) {
-			process.stdout.write(
-				`${model === opens ? "*" : " "} ${model.name}\t${defaultSamplingMode(model)}\tctx ${model.contextWindow}\t${model.modelPath}\n`,
-			);
+			// A discover entry has no model of its own to describe until something is serving at its address.
+			const detail = model.discover
+				? `discover\t${serverOrigin(model.baseUrl)}`
+				: `${defaultSamplingMode(model)}\tctx ${model.contextWindow}\t${model.modelPath}`;
+			process.stdout.write(`${model === opens ? "*" : " "} ${model.name}\t${detail}\n`);
 		}
 		return 0;
 	}
@@ -263,9 +288,12 @@ async function main(argv: string[]): Promise<number> {
 	}
 	if (values.mode !== undefined && !isSamplingMode(values.mode)) return fail("--mode must be thinking or instruct.");
 	let mode = printModel ? defaultSamplingMode(printModel) : "thinking";
+	let modeChosen = true;
 	if (values.mode !== undefined && isSamplingMode(values.mode)) mode = values.mode;
 	else if (session?.settings && savedModel && savedModel === printModel) mode = session.settings.mode;
 	else if (lastUsed && lastModel && lastModel === printModel) mode = lastUsed.mode;
+	// Nothing picked it: a discover entry cannot say whether it thinks until it has connected.
+	else modeChosen = false;
 
 	const prompt = values.print ?? positionals.join(" ");
 	if (prompt && values.resume) return fail("--resume opens a picker; with -p, use --session <id> or --continue.");
@@ -292,6 +320,7 @@ async function main(argv: string[]): Promise<number> {
 				session,
 				saveSessions,
 				verbose: values.verbose === true,
+				modeChosen,
 			});
 		}
 		// In interactive mode, only load a model if explicitly specified (--model) or resuming a session

@@ -178,6 +178,8 @@ export class LlamaServerManager {
 			return;
 		}
 
+		// stop() clears `active`, so note here whether this model was reachable a moment ago.
+		const wasAttached = this.active !== undefined && sameServer(this.active, model);
 		await this.stop();
 
 		const state = await this.health(origin, signal);
@@ -196,6 +198,18 @@ export class LlamaServerManager {
 			}
 			this.active = model;
 			return;
+		}
+
+		// A discovered entry names no GGUF of its own: there is nothing to start, and the path it last saw belongs
+		// to another machine. Say the link is down rather than fail inside llama-server. Once it has answered, the
+		// likely cause is the route rather than the server, so the two cases read differently.
+		if (model.discover) {
+			throw new Error(
+				wasAttached
+					? `Lost the connection to ${origin}. The server stopped, or the route to it did; ` +
+							`check any ssh tunnel, then reconnect with /model ${model.name}.`
+					: `Nothing is serving at ${origin}. Start llama-server there, then connect again.`,
+			);
 		}
 
 		onStatus?.(`Starting llama-server for ${model.name}`);

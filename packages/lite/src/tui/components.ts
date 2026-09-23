@@ -11,7 +11,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { ToolResult } from "../agent/types.ts";
-import type { LiteModel } from "../config/models.ts";
+import { type LiteModel, modelLabel } from "../config/models.ts";
 import type { SamplingMode } from "../config/sampling.ts";
 import type { AssistantMessage, ToolCall } from "../llm/types.ts";
 import type { InteractionMode } from "../prompt.ts";
@@ -552,7 +552,7 @@ export function formatFooter(state: FooterState): string {
 		parts.push(style.gray(`serving ${state.serving.modelName}`), style.gray(`port ${state.serving.port}`));
 		parts.push(style.green("[serving]"));
 	} else if (state.model) {
-		parts.push(style.gray(state.model.name));
+		parts.push(style.gray(modelLabel(state.model)));
 		if (state.mode) parts.push(style.gray(state.mode));
 
 		const status: AiStatus = state.aiStatus ?? "idle";
