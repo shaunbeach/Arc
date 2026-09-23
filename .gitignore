@@ -8,6 +8,7 @@ coverage/
 
 # Local model configuration holds machine-specific paths.
 models.yml
+models-*.yml
 
 # Copied from the repository root by the pi-lite prepack script.
 packages/lite/README.md
