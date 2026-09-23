@@ -2,17 +2,50 @@ import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { LiteModel } from "../config/models.ts";
 import { isSamplingMode, SAMPLING_MODES, type SamplingMode } from "../config/sampling.ts";
 
-export type CommandName = "model" | "mode" | "new" | "resume" | "quit";
+export type CommandName =
+	| "agent"
+	| "plan"
+	| "chat"
+	| "web"
+	| "model"
+	| "mode"
+	| "serve"
+	| "disconnect"
+	| "compact"
+	| "new"
+	| "resume"
+	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
+	{ name: "agent", description: "Switch to agent mode (autonomous coding with all tools)" },
+	{ name: "plan", description: "Switch to plan mode (design & planning, read-only tools)" },
+	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
+	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
 	{ name: "model", description: "Switch model (restarts llama-server)", argumentHint: "[name]" },
 	{ name: "mode", description: "Switch between thinking and instruct sampling", argumentHint: "[thinking|instruct]" },
-	{ name: "new", description: "Start a new session" },
+	{ name: "serve", description: "Serve a model as a remote host with live server logs", argumentHint: "[name]" },
+	{ name: "disconnect", description: "Stop llama-server and unload model without exiting app" },
+	{
+		name: "compact",
+		description: "Run context compaction on past tool calls and results",
+		argumentHint: "[threshold]",
+	},
+	{ name: "new", description: "Start a new session (clears the conversation)" },
 	{ name: "resume", description: "Resume a saved session from this directory", argumentHint: "[id]" },
 	{ name: "quit", description: "Exit" },
 ];
 
-const ALIASES: Record<string, CommandName> = { exit: "quit" };
+const ALIASES: Record<string, CommandName> = {
+	exit: "quit",
+	models: "model",
+	host: "serve",
+	stop: "disconnect",
+	clear: "new",
+	cls: "new",
+	reset: "new",
+	compress: "compact",
+	prune: "compact",
+};
 
 export interface ParsedCommand {
 	name: CommandName;
@@ -48,7 +81,9 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 	};
 	const argumentCompletions: Partial<Record<CommandName, (prefix: string) => { value: string; label: string }[]>> = {
 		model: complete(models.map((model) => model.name)),
+		serve: complete(models.map((model) => model.name)),
 		mode: complete(SAMPLING_MODES),
+		web: complete(["on", "off"]),
 	};
 	return COMMANDS.map((command) => ({
 		name: command.name,

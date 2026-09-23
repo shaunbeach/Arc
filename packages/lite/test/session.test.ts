@@ -70,6 +70,44 @@ describe("SessionFile", () => {
 		expect(loaded.settings).toEqual({ model: "model-a", mode: "instruct" });
 	});
 
+	it("records and restores the interaction mode, reading old files as agent mode", () => {
+		const file = SessionFile.create(appDir(), "/work/project", { ...settings, interactionMode: "agent" });
+		file.appendMessage(user("plan the refactor"));
+		file.updateSettings({ ...settings, interactionMode: "plan" });
+		expect(loadSession(file.path).settings).toEqual({ ...settings, interactionMode: "plan" });
+
+		// Resuming with the same settings writes nothing; a mode change is recorded like a model change.
+		const before = entries(file.path).length;
+		SessionFile.resume(loadSession(file.path), { ...settings, interactionMode: "plan" });
+		expect(entries(file.path)).toHaveLength(before);
+		SessionFile.resume(loadSession(file.path), { ...settings, interactionMode: "chat" });
+		expect(loadSession(file.path).settings?.interactionMode).toBe("chat");
+
+		// Files written before modes were recorded have no field, and an unknown value is ignored.
+		const old = SessionFile.create(appDir(), "/work/project", settings);
+		old.appendMessage(user("hi"));
+		appendFileSync(
+			old.path,
+			`${JSON.stringify({ type: "settings", ...settings, interactionMode: "bogus", timestamp: 2 })}\n`,
+		);
+		expect(loadSession(old.path).settings).toEqual(settings);
+		// Missing and "agent" are the same mode, so resuming an old file in agent mode writes nothing.
+		const count = entries(old.path).length;
+		SessionFile.resume(loadSession(old.path), { ...settings, interactionMode: "agent" });
+		expect(entries(old.path)).toHaveLength(count);
+	});
+
+	it("records web off and reads a missing value as web on", () => {
+		const file = SessionFile.create(appDir(), "/work/project", settings);
+		file.appendMessage(user("hi"));
+		expect(loadSession(file.path).settings?.web).toBeUndefined();
+
+		file.updateSettings({ ...settings, web: false });
+		expect(loadSession(file.path).settings).toEqual({ ...settings, web: false });
+		file.updateSettings({ ...settings, web: true });
+		expect(loadSession(file.path).settings?.web).toBeUndefined();
+	});
+
 	it("resumes appending to an existing file and records a different model", () => {
 		const file = SessionFile.create(appDir(), "/work/project", settings);
 		file.appendMessage(user("hi"));

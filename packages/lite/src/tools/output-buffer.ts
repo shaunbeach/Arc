@@ -8,13 +8,15 @@ import { type TruncationResult, truncateTail } from "./truncate.ts";
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
-	/** Temp file holding the complete output, once it outgrew the limits. */
+	/** Temp file holding the complete output, once it outgrew the limits or `saveAfterLines`. */
 	fullOutputPath?: string;
 }
 
 /**
  * Collects streaming command output in bounded memory: it keeps a decoded tail for display and, once the output
- * outgrows the limits, writes the complete raw output to a temp file instead of holding it.
+ * outgrows the limits or runs past `saveAfterLines`, writes the complete raw output to a temp file instead of holding
+ * it. The file outlives the result: once trimming cuts the result from the model's context, the model can still
+ * search the file rather than run the command again.
  */
 export class OutputBuffer {
 	private readonly limits: ToolLimits;
@@ -31,17 +33,19 @@ export class OutputBuffer {
 	private finished = false;
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private readonly saveAfterLines: number;
 
-	constructor(limits: ToolLimits) {
+	constructor(limits: ToolLimits, options: { saveAfterLines?: number } = {}) {
 		this.limits = limits;
 		this.maxTailBytes = Math.max(limits.maxBytes * 2, 1);
+		this.saveAfterLines = options.saveAfterLines ?? Number.POSITIVE_INFINITY;
 	}
 
 	append(data: Buffer): void {
 		if (this.finished) throw new Error("Cannot append to a finished output buffer");
 		this.totalRawBytes += data.length;
 		this.appendText(this.decoder.decode(data, { stream: true }));
-		if (this.tempFileStream || this.outgrewLimits()) {
+		if (this.tempFileStream || this.worthSaving()) {
 			this.ensureTempFile();
 			this.tempFileStream?.write(data);
 		} else if (data.length > 0) {
@@ -53,7 +57,7 @@ export class OutputBuffer {
 		if (this.finished) return;
 		this.finished = true;
 		this.appendText(this.decoder.decode());
-		if (this.outgrewLimits()) this.ensureTempFile();
+		if (this.worthSaving()) this.ensureTempFile();
 	}
 
 	snapshot(): OutputSnapshot {
@@ -127,6 +131,10 @@ export class OutputBuffer {
 			this.totalDecodedBytes > this.limits.maxBytes ||
 			this.totalLines > this.limits.maxLines
 		);
+	}
+
+	private worthSaving(): boolean {
+		return this.outgrewLimits() || this.totalLines > this.saveAfterLines;
 	}
 
 	private ensureTempFile(): void {

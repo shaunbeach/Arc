@@ -15,6 +15,7 @@ import type { Agent } from "./agent/agent.ts";
 import { isSamplingMode, type SamplingMode } from "./config/sampling.ts";
 import { userText } from "./llm/text.ts";
 import type { Message } from "./llm/types.ts";
+import { type InteractionMode, isInteractionMode } from "./prompt.ts";
 
 const SESSION_VERSION = 1;
 /** Bytes read from the start of each session file to build the picker preview. */
@@ -32,6 +33,20 @@ export interface SessionSettings {
 	/** models.yml model name. */
 	model: string;
 	mode: SamplingMode;
+	/** Agent, plan, or chat. Missing in sessions saved before modes were recorded, which ran in agent mode. */
+	interactionMode?: InteractionMode;
+	/** False after `/web off`. Missing means the web tools are on. */
+	web?: boolean;
+}
+
+function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boolean {
+	return (
+		a !== undefined &&
+		a.model === b.model &&
+		a.mode === b.mode &&
+		(a.interactionMode ?? "agent") === (b.interactionMode ?? "agent") &&
+		(a.web ?? true) === (b.web ?? true)
+	);
 }
 
 export type SessionEntry =
@@ -92,14 +107,14 @@ export class SessionFile {
 	/** Keep appending to a loaded session, recording the current settings if they differ from the saved ones. */
 	static resume(loaded: LoadedSession, settings: SessionSettings): SessionFile {
 		const file = new SessionFile(loaded.header.id, loaded.path, loaded.header.cwd, settings, true);
-		if (loaded.settings?.model !== settings.model || loaded.settings.mode !== settings.mode) {
+		if (!sameSettings(loaded.settings, settings)) {
 			file.write({ type: "settings", ...settings, timestamp: Date.now() });
 		}
 		return file;
 	}
 
 	updateSettings(settings: SessionSettings): void {
-		if (settings.model === this.settings.model && settings.mode === this.settings.mode) return;
+		if (sameSettings(this.settings, settings)) return;
 		this.settings = settings;
 		if (this.created) this.write({ type: "settings", ...settings, timestamp: Date.now() });
 	}
@@ -150,6 +165,10 @@ export function loadSession(path: string): LoadedSession {
 			messages.push(entry.message);
 		} else if (entry.type === "settings" && isSamplingMode(entry.mode)) {
 			settings = { model: entry.model, mode: entry.mode };
+			if (typeof entry.interactionMode === "string" && isInteractionMode(entry.interactionMode)) {
+				settings.interactionMode = entry.interactionMode;
+			}
+			if (entry.web === false) settings.web = false;
 		}
 	}
 	if (!header) throw new Error(`${path} is empty.`);

@@ -221,9 +221,30 @@ describe("bash", () => {
 	it("keeps the tail of long output and saves all of it to a file", async () => {
 		const bash = createBashTool(setup({ maxLines: 5, maxBytes: 50 * 1024 }));
 		const output = text(await run(bash, { command: "seq 1 20" }));
-		const match = output.match(/^16\n17\n18\n19\n20\n\n\[Showing the last 5 of 20 lines\. Full output: (.+)\]$/);
+		const match = output.match(
+			/^16\n17\n18\n19\n20\n\n\[Showing the last 5 of 20 lines\. Full output: (.+)\. Search it with grep instead of running the command again\.\]$/,
+		);
 		expect(match).not.toBeNull();
 		const expected = `${Array.from({ length: 20 }, (_, i) => i + 1).join("\n")}\n`;
 		expect(readFileSync(match?.[1] ?? "", "utf8")).toBe(expected);
+	});
+
+	it("saves output longer than 30 lines even when all of it is shown, and not shorter output", async () => {
+		const bash = createBashTool(setup());
+		const long = text(await run(bash, { command: "seq 1 31" }));
+		const path =
+			/\[Full output also saved to (.+)\. Search it with grep instead of running the command again\.\]$/.exec(
+				long,
+			)?.[1];
+		expect(long.startsWith("1\n2\n")).toBe(true);
+		expect(readFileSync(path ?? "", "utf8")).toBe(`${Array.from({ length: 31 }, (_, i) => i + 1).join("\n")}\n`);
+		expect(text(await run(bash, { command: "seq 1 30" }))).not.toContain("saved to");
+	});
+
+	it("rejects commands containing elision placeholders", async () => {
+		const bash = createBashTool(setup());
+		await expect(run(bash, { command: "cat > file << 'EOF'\n[elided from context: 83 lines]\nEOF" })).rejects.toThrow(
+			"command contains a placeholder for text elided from your context",
+		);
 	});
 });

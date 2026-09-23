@@ -6,6 +6,9 @@ import type { CodingToolOptions } from "./options.ts";
 import { OutputBuffer } from "./output-buffer.ts";
 import type { TruncationResult } from "./truncate.ts";
 
+/** Output longer than this is also saved to a file, so the model can search it instead of running it again. */
+const SAVE_OUTPUT_AFTER_LINES = 30;
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Command" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
@@ -30,11 +33,16 @@ export function createBashTool(options: CodingToolOptions): AgentTool<typeof bas
 		parameters: bashSchema,
 		async execute(_toolCallId, { command, timeout }, signal, onUpdate) {
 			if (timeout !== undefined && !(timeout > 0)) throw new Error("timeout must be a positive number of seconds.");
+			if (command.includes("[elided from context")) {
+				throw new Error(
+					"command contains a placeholder for text elided from your context, not executable code. Re-read the file or supply the real content.",
+				);
+			}
 			await stat(cwd).catch(() => {
 				throw new Error(`Working directory does not exist: ${cwd}`);
 			});
 
-			const output = new OutputBuffer(limits);
+			const output = new OutputBuffer(limits, { saveAfterLines: SAVE_OUTPUT_AFTER_LINES });
 			let updateTimer: NodeJS.Timeout | undefined;
 			let lastUpdate = 0;
 			const sendUpdate = () => {
@@ -63,9 +71,14 @@ export function createBashTool(options: CodingToolOptions): AgentTool<typeof bas
 
 			const snapshot = output.snapshot();
 			let text = snapshot.content.trimEnd();
-			if (snapshot.truncation.truncated) {
+			if (snapshot.fullOutputPath) {
+				// Name the file even when everything is shown: trimming may cut this result later, and searching the
+				// file beats running a slow command, such as a test suite, again.
 				const { outputLines, totalLines } = snapshot.truncation;
-				const notice = `[Showing the last ${outputLines} of ${totalLines} lines. Full output: ${snapshot.fullOutputPath}]`;
+				const shown = snapshot.truncation.truncated
+					? `Showing the last ${outputLines} of ${totalLines} lines. Full output: ${snapshot.fullOutputPath}`
+					: `Full output also saved to ${snapshot.fullOutputPath}`;
+				const notice = `[${shown}. Search it with grep instead of running the command again.]`;
 				text = text ? `${text}\n\n${notice}` : notice;
 			}
 			const failure = (status: string) => new Error(text ? `${text}\n\n${status}` : status);

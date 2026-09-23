@@ -1,8 +1,15 @@
 import type { LiteModel } from "../config/models.ts";
 import { resolvePreset, type SamplingMode } from "../config/sampling.ts";
-import { ContextWindow } from "../context.ts";
+import { ContextWindow, estimateMessageTokens } from "../context.ts";
+import { type CompactResult, compact, compactHeuristic, type JevAsker, LocalLlamaJevAsker } from "../jev/index.ts";
 import type { AssistantMessage, Message, UserMessage } from "../llm/types.ts";
-import { estimateFixedPromptTokens } from "../prompt.ts";
+import {
+	buildSystemPrompt,
+	estimateFixedPromptTokens,
+	type InteractionMode,
+	TOOLS_BY_MODE,
+	WEB_TOOLS,
+} from "../prompt.ts";
 import { runAgentLoop } from "./agent-loop.ts";
 import type { AgentEvent, AgentTool, StreamFn } from "./types.ts";
 
@@ -12,13 +19,19 @@ export type AgentListener = (event: AgentEvent) => void | Promise<void>;
 const MIN_REPLY_TOKENS = 1024;
 
 export interface AgentOptions {
-	model: LiteModel;
-	mode: SamplingMode;
-	systemPrompt: string;
-	tools: AgentTool[];
+	model?: LiteModel;
+	mode?: SamplingMode;
+	interactionMode?: InteractionMode;
+	/** Whether the model has the web tools. Default: yes. */
+	web?: boolean;
+	cwd?: string;
+	systemPrompt?: string;
+	tools?: AgentTool[];
 	messages?: Message[];
 	/** Default: `streamChat` against the model's llama-server. */
 	streamFn?: StreamFn;
+	/** Evaluator for `/compact`. Default: the model's own llama-server. */
+	jevAsker?: JevAsker;
 }
 
 function userMessage(text: string): UserMessage {
@@ -30,24 +43,35 @@ function userMessage(text: string): UserMessage {
  * runs. Each request carries only as much history as fits the model's window; the transcript itself keeps everything.
  */
 export class Agent {
-	model: LiteModel;
+	model: LiteModel | undefined;
 	mode: SamplingMode;
+	interactionMode: InteractionMode;
+	web: boolean;
+	cwd: string;
 	systemPrompt: string;
 	tools: AgentTool[];
 	private transcript: Message[];
 	private readonly streamFn: StreamFn | undefined;
+	private readonly jevAsker: JevAsker | undefined;
 	private readonly listeners = new Set<AgentListener>();
-	private readonly contextWindow = new ContextWindow();
+	private readonly contextWindow: ContextWindow;
 	private queue: UserMessage[] = [];
 	private run: { controller: AbortController; done: Promise<void> } | undefined;
 
 	constructor(options: AgentOptions) {
 		this.model = options.model;
-		this.mode = options.mode;
-		this.systemPrompt = options.systemPrompt;
-		this.tools = options.tools;
+		this.mode = options.mode ?? "thinking";
+		this.interactionMode = options.interactionMode ?? "agent";
+		this.web = options.web ?? true;
+		this.cwd = options.cwd ?? process.cwd();
+		this.contextWindow = new ContextWindow({ cwd: this.cwd });
+		this.systemPrompt =
+			options.systemPrompt ??
+			buildSystemPrompt({ cwd: this.cwd, interactionMode: this.interactionMode, web: this.web });
+		this.tools = options.tools ? [...options.tools] : [];
 		this.transcript = options.messages ? [...options.messages] : [];
 		this.streamFn = options.streamFn;
+		this.jevAsker = options.jevAsker;
 	}
 
 	get messages(): readonly Message[] {
@@ -95,8 +119,101 @@ export class Agent {
 		return this.run?.done ?? Promise.resolve();
 	}
 
+	/**
+	 * Compacts past tool calls and results using Jev evaluation, falling back to the heuristic when the evaluator
+	 * fails. Like automatic trimming, it changes only what later requests send: the transcript and the session file
+	 * keep every message. Aborting `signal` cancels without compacting anything.
+	 */
+	async compact(
+		options: { keepThreshold?: number; preserveRecentSteps?: number; signal?: AbortSignal } = {},
+	): Promise<{
+		compactedCalls: number;
+		tokensSaved: number;
+		estimatedTokens: number;
+		/** Calls Jev decided; the rest were decided by the heuristic. */
+		askedCalls: number;
+		/** Why Jev was not used, when it was not. */
+		fallbackReason?: string;
+	}> {
+		if (this.run) throw new Error("Cannot compact while the agent is running.");
+		const keepThreshold = options.keepThreshold ?? 0.5;
+		const preserveRecentSteps = options.preserveRecentSteps ?? 1;
+		const tokensOf = (messages: readonly Message[]) =>
+			messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+
+		const asker = this.jevAsker ?? (this.model ? this.getJevAsker(this.model) : undefined);
+		const before = this.contextWindow.view(this.transcript);
+		const { settled, isSent } = this.contextWindow.compactionScope(this.transcript);
+
+		let result: CompactResult;
+		let fallbackReason: string | undefined;
+		if (asker && this.model) {
+			try {
+				result = await compact(this.transcript, asker, {
+					keepThreshold,
+					preserveRecentSteps,
+					exclude: settled,
+					isSent,
+					// The evaluator shares the model's window: its request gets half, in characters (3 per token).
+					maxRequestChars: Math.floor(this.model.contextWindow * 0.5 * 3),
+					signal: options.signal,
+				});
+			} catch (error) {
+				if (options.signal?.aborted) throw new Error("Compaction cancelled.");
+				fallbackReason = error instanceof Error ? error.message : String(error);
+				result = compactHeuristic(this.transcript, preserveRecentSteps);
+			}
+		} else {
+			fallbackReason = "no model is loaded";
+			result = compactHeuristic(this.transcript, preserveRecentSteps);
+		}
+		this.contextWindow.adoptDecisions(this.transcript, result.decisions);
+
+		const after = this.contextWindow.view(this.transcript);
+		const estimatedTokens = tokensOf(after.messages);
+		return {
+			compactedCalls: Math.max(0, after.compactedCalls - before.compactedCalls),
+			tokensSaved: Math.max(0, tokensOf(before.messages) - estimatedTokens),
+			estimatedTokens,
+			askedCalls: result.askedCalls,
+			fallbackReason,
+		};
+	}
+
+	/** Switch interaction mode (agent, plan, or chat), updating the system prompt. */
+	setInteractionMode(mode: InteractionMode): void {
+		this.interactionMode = mode;
+		this.rebuildSystemPrompt();
+	}
+
+	/** Give the model the web tools, or take them away (`/web`). The prompt says which it has. */
+	setWeb(web: boolean): void {
+		this.web = web;
+		this.rebuildSystemPrompt();
+	}
+
+	/** Update working directory and regenerate system prompt. */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+		this.contextWindow.cwd = cwd;
+		this.rebuildSystemPrompt();
+	}
+
+	private rebuildSystemPrompt(): void {
+		this.systemPrompt = buildSystemPrompt({ cwd: this.cwd, interactionMode: this.interactionMode, web: this.web });
+	}
+
+	/** The tools available for the current interaction mode, without the web tools while web is off. */
+	get activeTools(): AgentTool[] {
+		const allowed = this.interactionMode === "agent" ? undefined : TOOLS_BY_MODE[this.interactionMode];
+		return this.tools.filter(
+			(tool) => (!allowed || allowed.includes(tool.name)) && (this.web || !WEB_TOOLS.includes(tool.name)),
+		);
+	}
+
 	async prompt(input: string | UserMessage): Promise<void> {
 		if (this.run) throw new Error("The agent is already running. Queue the message with enqueue().");
+		if (!this.model) throw new Error("No model loaded. Please select a model with /model.");
 		const controller = new AbortController();
 		let settle = () => {};
 		this.run = {
@@ -110,11 +227,12 @@ export class Agent {
 		const preset = resolvePreset(this.mode, model.sampling);
 		const budget = model.contextWindow - model.maxTokens;
 		const replyFloor = Math.min(MIN_REPLY_TOKENS, model.maxTokens);
-		const fixedTokens = estimateFixedPromptTokens(this.systemPrompt, this.tools);
+		const activeTools = this.activeTools;
+		const fixedTokens = estimateFixedPromptTokens(this.systemPrompt, activeTools);
 		try {
 			await runAgentLoop(
 				[typeof input === "string" ? userMessage(input) : input],
-				{ systemPrompt: this.systemPrompt, messages: this.transcript.slice(), tools: this.tools.slice() },
+				{ systemPrompt: this.systemPrompt, messages: this.transcript.slice(), tools: activeTools.slice() },
 				{
 					model,
 					preset,
@@ -155,6 +273,12 @@ export class Agent {
 			this.run = undefined;
 			settle();
 		}
+	}
+
+	private getJevAsker(model: LiteModel): LocalLlamaJevAsker | undefined {
+		if (!model.baseUrl) return undefined;
+		const llamaUrl = model.baseUrl.replace(/\/v1\/?$/, "");
+		return new LocalLlamaJevAsker({ llamaUrl });
 	}
 
 	private async emit(event: AgentEvent): Promise<void> {

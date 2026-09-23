@@ -5,6 +5,7 @@ import { runAgentLoop } from "../src/agent/agent-loop.ts";
 import type { AgentEvent, AgentTool, StreamFn } from "../src/agent/types.ts";
 import type { LiteModel } from "../src/config/models.ts";
 import { resolvePreset } from "../src/config/sampling.ts";
+import type { JevAsker } from "../src/jev/types.ts";
 import { AssistantMessageEventStream } from "../src/llm/event-stream.ts";
 import type { AssistantMessage, Message, StopReason, ToolCall, UserMessage } from "../src/llm/types.ts";
 
@@ -258,6 +259,152 @@ describe("Agent", () => {
 		expect(requests[1]).toHaveLength(1);
 		expect(requests[1][0]).toMatchObject({ content: "b".repeat(1500) });
 		expect(trimmed).toEqual([2]);
+	});
+
+	it("compacts what requests send without changing the transcript", async () => {
+		const content = "line\n".repeat(200);
+		const toolResult = (id: string, toolName: string, text: string): Message => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName,
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 0,
+		});
+		const step = (blocks: AssistantMessage["content"], stopReason: StopReason = "toolUse"): Message => ({
+			role: "assistant",
+			content: blocks,
+			model: "test-model",
+			usage: { promptTokens: 0, cachedTokens: 0, completionTokens: 0 },
+			stopReason,
+			timestamp: 0,
+		});
+		const history: Message[] = [
+			user("write it"),
+			step([call("c1", "write", { path: "a.txt", content })]),
+			toolResult("c1", "write", "Wrote a.txt"),
+			step([call("c2", "read", { path: "b.txt" })]),
+			toolResult("c2", "read", "b"),
+			step([say("done")], "stop"),
+		];
+		const { streamFn, requests } = script({ content: [say("ok")] });
+		// No model while compacting: the heuristic decides, so the test never reaches a server.
+		const agent = new Agent({ mode: "instruct", systemPrompt: "sys", tools: [], streamFn, messages: history });
+
+		const compacted = await agent.compact();
+		expect(compacted.compactedCalls).toBe(1);
+		expect(compacted.tokensSaved).toBeGreaterThan(300);
+		expect(agent.messages).toEqual(history);
+
+		agent.model = model;
+		await agent.prompt("next");
+		expect(JSON.stringify(requests[0])).not.toContain(content);
+		expect(requests[0][1]).toMatchObject({
+			role: "assistant",
+			content: [say(expect.stringContaining("wrote a.txt (201 lines)")), call("c2", "read", { path: "b.txt" })],
+		});
+		expect(agent.messages.slice(0, history.length)).toEqual(history);
+	});
+
+	it("never asks the evaluator while trimming, and uses it only for /compact", async () => {
+		const small: LiteModel = { ...model, contextWindow: 1000, maxTokens: 200 };
+		let asked = 0;
+		const jevAsker: JevAsker = {
+			ask: async (_state, questions) => {
+				asked++;
+				return { answers: Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: 0 }])) };
+			},
+		};
+		const { streamFn } = script(
+			{ content: [call("c1", "echo", { text: "x".repeat(900) })] },
+			{ content: [call("c2", "echo", { text: "y".repeat(900) })] },
+			{ content: [call("c3", "echo", { text: "z" })] },
+			{ content: [say("done")] },
+		);
+		const agent = new Agent({
+			model: small,
+			mode: "instruct",
+			systemPrompt: "sys",
+			tools: [echoTool([])],
+			streamFn,
+			jevAsker,
+		});
+		const trims: number[] = [];
+		agent.subscribe((event) => {
+			if (event.type === "context_trimmed") trims.push(event.compactedSteps);
+		});
+
+		await agent.prompt("go");
+		expect(trims.length).toBeGreaterThan(0);
+		expect(asked).toBe(0);
+
+		const compacted = await agent.compact();
+		expect(asked).toBe(1);
+		expect(compacted.fallbackReason).toBeUndefined();
+		expect(compacted.askedCalls).toBeGreaterThan(0);
+	});
+
+	it("falls back to the heuristic when the evaluator fails, and cancels on abort", async () => {
+		const history: Message[] = [
+			user("go"),
+			{
+				role: "assistant",
+				content: [call("c1", "read", { path: "a" })],
+				model: "test-model",
+				usage: { promptTokens: 0, cachedTokens: 0, completionTokens: 0 },
+				stopReason: "toolUse",
+				timestamp: 0,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "read",
+				content: [say("a\n".repeat(400))],
+				isError: false,
+				timestamp: 0,
+			},
+			{
+				role: "assistant",
+				content: [say("done")],
+				model: "test-model",
+				usage: { promptTokens: 0, cachedTokens: 0, completionTokens: 0 },
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		];
+		const failing: JevAsker = {
+			ask: async () => {
+				throw new Error("llama-server returned HTTP 400");
+			},
+		};
+		const agent = new Agent({
+			model,
+			mode: "instruct",
+			systemPrompt: "sys",
+			tools: [],
+			messages: history,
+			jevAsker: failing,
+		});
+		const res = await agent.compact();
+		expect(res.fallbackReason).toBe("llama-server returned HTTP 400");
+		expect(res.compactedCalls).toBe(1);
+
+		const hanging: JevAsker = {
+			ask: (_state, _questions, signal) =>
+				new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+		};
+		const other = new Agent({
+			model,
+			mode: "instruct",
+			systemPrompt: "sys",
+			tools: [],
+			messages: history,
+			jevAsker: hanging,
+		});
+		const controller = new AbortController();
+		const pending = other.compact({ signal: controller.signal });
+		controller.abort();
+		await expect(pending).rejects.toThrow("Compaction cancelled.");
 	});
 
 	it("ends the run with an error instead of sending a request that leaves no room for the reply", async () => {

@@ -3,7 +3,16 @@ import { describe, expect, it } from "vitest";
 import type { LiteModel } from "../src/config/models.ts";
 import type { AssistantMessage, ToolCall } from "../src/llm/types.ts";
 import { parseCommand, resolveMode, slashCommands } from "../src/tui/commands.ts";
-import { AssistantView, formatFooter, formatTokens, Line, ToolView } from "../src/tui/components.ts";
+import {
+	AssistantView,
+	BannerView,
+	describeToolCall,
+	formatFooter,
+	formatTokens,
+	Line,
+	ServeView,
+	ToolView,
+} from "../src/tui/components.ts";
 
 const WIDTH = 60;
 const plainLines = (component: { render(width: number): string[] }, width = WIDTH) =>
@@ -116,6 +125,15 @@ describe("ToolView", () => {
 		view.setResult({ content: [{ type: "text", text: "y".repeat(500) }] }, false);
 		for (const line of view.render(40)) expect(visibleWidth(line)).toBeLessThanOrEqual(40);
 	});
+
+	it("describes web_search and web_fetch tool calls", () => {
+		expect(
+			describeToolCall({ type: "toolCall", id: "c4", name: "web_search", arguments: { query: "hello world" } }),
+		).toBe("hello world");
+		expect(
+			describeToolCall({ type: "toolCall", id: "c5", name: "web_fetch", arguments: { url: "https://example.com" } }),
+		).toBe("https://example.com");
+	});
 });
 
 describe("Line and footer", () => {
@@ -126,21 +144,85 @@ describe("Line and footer", () => {
 		expect(line.render(20)).toEqual([]);
 	});
 
-	it("shows model, mode, context fill, speed, and directory", () => {
+	it("shows model, mode, status, context fill, speed, and directory", () => {
 		const reply = assistant([], {
 			usage: { promptTokens: 5000, cachedTokens: 4800, completionTokens: 300 },
 			timings: { promptPerSecond: 900, predictedPerSecond: 21.46 },
 		});
 		expect(
 			formatFooter({ model, mode: "thinking", cwd: "/srv/app", lastReply: reply }).replace(/\x1b\[\d+m/g, ""),
-		).toBe(" Qwen-27B · thinking · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		).toBe(" Qwen-27B · thinking · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(
+			formatFooter({ model, mode: "thinking", aiStatus: "thinking", cwd: "/srv/app", lastReply: reply }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · thinking · [thinking] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(
+			formatFooter({ model, mode: "thinking", aiStatus: "working", cwd: "/srv/app", lastReply: reply }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · thinking · [working] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(
+			formatFooter({ model, mode: "thinking", interactionMode: "plan", cwd: "/srv/app", lastReply: reply }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · thinking · [plan] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(
+			formatFooter({ model, mode: "thinking", interactionMode: "chat", cwd: "/srv/app", lastReply: reply }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · thinking · [chat] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(
+			formatFooter({ model, mode: "thinking", aiStatus: "serving", cwd: "/srv/app", lastReply: reply }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · thinking · [serving] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		expect(formatFooter({ cwd: "/srv/app" }).replace(/\x1b\[\d+m/g, "")).toBe(" no model · /srv/app");
+		expect(
+			formatFooter({ model, mode: "instruct", interactionMode: "plan", web: false, cwd: "/srv/app" }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			),
+		).toBe(" Qwen-27B · instruct · [plan] · [no web] · [idle] · /srv/app");
+		// While hosting, the footer names the served model, with or without a model selected for prompts.
+		const serving = { modelName: "Qwen-27B-host", port: "18555" };
+		for (const selected of [undefined, model]) {
+			expect(
+				formatFooter({ model: selected, mode: "thinking", cwd: "/srv/app", serving }).replace(/\x1b\[\d+m/g, ""),
+			).toBe(" serving Qwen-27B-host · port 18555 · [serving] · /srv/app");
+		}
 		expect(formatTokens(999)).toBe("999");
 	});
 });
 
 describe("commands", () => {
 	it("recognizes known commands with arguments and leaves other slash text as messages", () => {
+		expect(parseCommand("/agent")).toEqual({ name: "agent", args: "" });
+		expect(parseCommand("/plan")).toEqual({ name: "plan", args: "" });
+		expect(parseCommand("/chat")).toEqual({ name: "chat", args: "" });
 		expect(parseCommand("/model  qwen 27b ")).toEqual({ name: "model", args: "qwen 27b" });
+		expect(parseCommand("/models")).toEqual({ name: "model", args: "" });
+		expect(parseCommand("/serve")).toEqual({ name: "serve", args: "" });
+		expect(parseCommand("/serve  qwen 27b ")).toEqual({ name: "serve", args: "qwen 27b" });
+		expect(parseCommand("/host")).toEqual({ name: "serve", args: "" });
+		expect(parseCommand("/disconnect")).toEqual({ name: "disconnect", args: "" });
+		expect(parseCommand("/stop")).toEqual({ name: "disconnect", args: "" });
+		// /clear and its old aliases are the same command as /new.
+		expect(parseCommand("/clear")).toEqual({ name: "new", args: "" });
+		expect(parseCommand("/reset")).toEqual({ name: "new", args: "" });
+		expect(parseCommand("/cls")).toEqual({ name: "new", args: "" });
+		expect(parseCommand("/compact")).toEqual({ name: "compact", args: "" });
+		expect(parseCommand("/compact 0.7")).toEqual({ name: "compact", args: "0.7" });
+		expect(parseCommand("/compress")).toEqual({ name: "compact", args: "" });
+		expect(parseCommand("/prune")).toEqual({ name: "compact", args: "" });
+		expect(parseCommand("/new")).toEqual({ name: "new", args: "" });
+		expect(parseCommand("/web")).toEqual({ name: "web", args: "" });
+		expect(parseCommand("/web off")).toEqual({ name: "web", args: "off" });
 		expect(parseCommand("/exit")).toEqual({ name: "quit", args: "" });
 		expect(parseCommand("/tmp/build.log shows an error")).toBeUndefined();
 		expect(parseCommand("/unknown")).toBeUndefined();
@@ -158,7 +240,133 @@ describe("commands", () => {
 		const commands = slashCommands([model]);
 		const modelCommand = commands.find((command) => command.name === "model");
 		const modeCommand = commands.find((command) => command.name === "mode");
+		const serveCommand = commands.find((command) => command.name === "serve");
 		expect(await modelCommand?.getArgumentCompletions?.("27")).toEqual([{ value: "Qwen-27B", label: "Qwen-27B" }]);
 		expect(await modeCommand?.getArgumentCompletions?.("in")).toEqual([{ value: "instruct", label: "instruct" }]);
+		expect(await serveCommand?.getArgumentCompletions?.("27")).toEqual([{ value: "Qwen-27B", label: "Qwen-27B" }]);
+	});
+});
+
+describe("BannerView", () => {
+	it("renders boxed banner with version, model, workspace, and hints", () => {
+		const banner = new BannerView({
+			version: "1.0.0",
+			cwd: "/srv/app",
+			modelName: "Qwen-27B",
+			mode: "thinking",
+		});
+		const lines = plainLines(banner, 80);
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toContain("╭");
+		expect(lines.some((line) => line.includes("⚡ Pi-Lite CLI v1.0.0"))).toBe(true);
+		expect(lines.some((line) => line.includes("Model:     Qwen-27B (thinking)"))).toBe(true);
+		expect(lines.some((line) => line.includes("Workspace: /srv/app"))).toBe(true);
+		expect(lines.some((line) => line.includes("Commands:  type / for menu, /model to select"))).toBe(true);
+		expect(lines[lines.length - 1]).toContain("╰");
+	});
+
+	it("omits model line when modelName is not provided", () => {
+		const banner = new BannerView({
+			version: "1.0.0",
+			cwd: "/srv/app",
+		});
+		const lines = plainLines(banner, 80);
+		expect(lines.some((line) => line.includes("Model:"))).toBe(false);
+	});
+
+	it("updates when setModel and setCwd are called", () => {
+		const banner = new BannerView({
+			version: "1.0.0",
+			cwd: "/srv/app",
+		});
+		banner.setModel("New-Model", "instruct");
+		banner.setCwd("/srv/other");
+		const lines = plainLines(banner, 80);
+		expect(lines.some((line) => line.includes("Model:     New-Model (instruct)"))).toBe(true);
+		expect(lines.some((line) => line.includes("Workspace: /srv/other"))).toBe(true);
+	});
+
+	it("never exceeds terminal width", () => {
+		const banner = new BannerView({
+			version: "1.0.0",
+			cwd: "/a/very/long/path/that/might/exceed/terminal/width/easily/on/a/narrow/terminal",
+			modelName: "VeryLongModelName-ExtraLong-Reasoning-Special",
+			mode: "thinking",
+		});
+		for (const w of [30, 40, 50, 60, 80, 120]) {
+			for (const line of banner.render(w)) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+			}
+		}
+	});
+});
+
+describe("ServeView", () => {
+	it("renders boxed serve view with URLs and instruction", () => {
+		const serve = new ServeView({
+			modelName: "test-model",
+			port: "8080",
+			localUrl: "http://localhost:8080/v1",
+			remoteUrl: "http://192.168.1.10:8080/v1",
+		});
+		const lines = plainLines(serve, 80);
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toContain("╭");
+		expect(lines.some((line) => line.includes("Hosting Remote Model: test-model"))).toBe(true);
+		expect(lines.some((line) => line.includes("Remote URL: http://192.168.1.10:8080/v1"))).toBe(true);
+		expect(lines.some((line) => line.includes("Local URL:  http://localhost:8080/v1"))).toBe(true);
+		expect(lines.some((line) => line.includes("Press Esc or Ctrl+C to stop server"))).toBe(true);
+		expect(lines.some((line) => line.includes("╰"))).toBe(true);
+		expect(lines.some((line) => line.includes("Live Server Logs"))).toBe(true);
+	});
+
+	it("appends and renders log lines", () => {
+		const serve = new ServeView({
+			modelName: "test-model",
+			port: "8080",
+			localUrl: "http://localhost:8080/v1",
+			remoteUrl: "http://192.168.1.10:8080/v1",
+		});
+		serve.addLogLine("HTTP server listening on 0.0.0.0:8080");
+		serve.addLogLine("slot prompt evaluation: 15 tok/s");
+		const lines = plainLines(serve, 80);
+		expect(lines.some((line) => line.includes("HTTP server listening on 0.0.0.0:8080"))).toBe(true);
+		expect(lines.some((line) => line.includes("slot prompt evaluation: 15 tok/s"))).toBe(true);
+	});
+
+	it("fits its maximum height by showing fewer log lines, down to three", () => {
+		let maxHeight = 20;
+		const serve = new ServeView({
+			modelName: "test-model",
+			port: "8080",
+			localUrl: "http://localhost:8080/v1",
+			remoteUrl: "http://192.168.1.10:8080/v1",
+			maxHeight: () => maxHeight,
+		});
+		for (let i = 1; i <= 40; i++) serve.addLogLine(`log ${i}`);
+		const logs = () => plainLines(serve, 80).filter((line) => line.startsWith("  log "));
+
+		expect(plainLines(serve, 80)).toHaveLength(20);
+		expect(logs().at(-1)).toBe("  log 40");
+		maxHeight = 100;
+		expect(logs()).toHaveLength(15);
+		// Too short for the box: one header line, then as many log lines as fit.
+		maxHeight = 8;
+		const compact = plainLines(serve, 80);
+		expect(compact).toHaveLength(8);
+		expect(compact[0]).toBe("Hosting test-model · http://192.168.1.10:8080/v1");
+		expect(logs()).toHaveLength(7);
+	});
+
+	it("renders memory swap text when set", () => {
+		const serve = new ServeView({
+			modelName: "test-model",
+			port: "8080",
+			localUrl: "http://localhost:8080/v1",
+			remoteUrl: "http://192.168.1.10:8080/v1",
+		});
+		serve.setSwapText("Swap: 0.5 GB / 4.5 GB limit");
+		const lines = plainLines(serve, 80);
+		expect(lines.some((line) => line.includes("Memory:     Swap: 0.5 GB / 4.5 GB limit"))).toBe(true);
 	});
 });

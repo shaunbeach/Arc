@@ -1,5 +1,6 @@
 import { type ChildProcess, type SpawnOptions, spawn as spawnProcess } from "node:child_process";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, writeSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { hasFlag, type LiteModel } from "../config/models.ts";
@@ -34,14 +35,72 @@ export function serverOrigin(baseUrl: string): string {
 	return `${url.origin}${path}`;
 }
 
+export function serverPort(baseUrl: string): string {
+	const url = new URL(baseUrl);
+	return url.port || (url.protocol === "https:" ? "443" : "80");
+}
+
+export function getLocalIpAddress(): string {
+	const interfaces = networkInterfaces();
+	for (const name of Object.keys(interfaces)) {
+		for (const net of interfaces[name] ?? []) {
+			if (net.family === "IPv4" && !net.internal) {
+				return net.address;
+			}
+		}
+	}
+	return "127.0.0.1";
+}
+
+/** Check whether any llama-server slot is actively processing a request. */
+export async function isServerBusy(
+	origin: string,
+	fetchFn: typeof fetch = fetch,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	try {
+		const res = await fetchFn(`${origin}/slots`, { signal });
+		if (!res.ok) return false;
+		const slots = (await res.json()) as Array<{ is_processing?: boolean }>;
+		if (Array.isArray(slots)) {
+			return slots.some((slot) => slot.is_processing === true);
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+/** Poll /slots until all slots are idle, or timeout expires. */
+export async function waitForSlotsIdle(
+	origin: string,
+	timeoutMs = 60_000,
+	fetchFn: typeof fetch = fetch,
+	signal?: AbortSignal,
+	pollIntervalMs = 500,
+): Promise<boolean> {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		if (signal?.aborted) return false;
+		const busy = await isServerBusy(origin, fetchFn, signal);
+		if (!busy) return true;
+		await delay(pollIntervalMs, undefined, { signal }).catch(() => {});
+	}
+	return false;
+}
+
 /** `-m <modelPath>`, the model's launchArgs, then --port/--host from baseUrl when launchArgs leave them out. */
-export function buildServerArgs(model: LiteModel): string[] {
+export function buildServerArgs(model: LiteModel, isHost = false): string[] {
 	const url = new URL(model.baseUrl);
 	const args = ["-m", model.modelPath, ...model.launchArgs];
 	if (!hasFlag(model.launchArgs, ["--port"])) {
 		args.push("--port", url.port || (url.protocol === "https:" ? "443" : "80"));
 	}
-	if (!hasFlag(model.launchArgs, ["--host"]) && !LOCAL_HOSTS.has(url.hostname)) {
+	if (isHost) {
+		if (!hasFlag(model.launchArgs, ["--host"])) {
+			args.push("--host", "0.0.0.0");
+		}
+	} else if (!hasFlag(model.launchArgs, ["--host"]) && !LOCAL_HOSTS.has(url.hostname)) {
 		args.push("--host", url.hostname);
 	}
 	return args;
@@ -151,6 +210,61 @@ export class LlamaServerManager {
 		this.active = model;
 	}
 
+	/** Check if any slot on the active server is currently processing. */
+	async isProcessing(signal?: AbortSignal): Promise<boolean> {
+		if (!this.active) return false;
+		return isServerBusy(serverOrigin(this.active.baseUrl), this.fetchFn, signal);
+	}
+
+	/** Wait until all slots on the active server are idle, or timeout expires. */
+	async waitForIdle(timeoutMs = 60_000, signal?: AbortSignal): Promise<boolean> {
+		if (!this.active) return true;
+		return waitForSlotsIdle(serverOrigin(this.active.baseUrl), timeoutMs, this.fetchFn, signal);
+	}
+
+	/** Start serving model on 0.0.0.0 as a remote host, streaming logs to callback. */
+	async startHost(
+		model: LiteModel,
+		onLogLine: (line: string) => void,
+		signal?: AbortSignal,
+	): Promise<{ port: string; localIp: string; localUrl: string; remoteUrl: string }> {
+		await this.stop();
+		const port = serverPort(model.baseUrl);
+		const origin = `http://localhost:${port}`;
+
+		// A second server can bind 0.0.0.0 next to one on 127.0.0.1 (macOS allows it), and the health check below
+		// would then pass on the old one. Refuse instead: a server this manager did not spawn is never stopped.
+		const state = await this.health(origin, signal);
+		if (state === "foreign") {
+			throw new Error(`${origin} is in use by something other than llama-server. Free the port or change baseUrl.`);
+		}
+		if (state !== "down") {
+			throw new Error(
+				`A llama-server pi-lite did not start is already running at ${origin}. ` +
+					`Stop it or give ${model.name} another port in models.yml.`,
+			);
+		}
+
+		const child = this.spawnServer(model, true, onLogLine);
+		this.child = child;
+
+		try {
+			await this.waitUntilReady(origin, child, signal);
+		} catch (error) {
+			await this.stop();
+			throw error;
+		}
+
+		this.active = model;
+		const localIp = getLocalIpAddress();
+		return {
+			port,
+			localIp,
+			localUrl: `http://localhost:${port}/v1`,
+			remoteUrl: `http://${localIp}:${port}/v1`,
+		};
+	}
+
 	/** Stop the server this manager spawned. A server it only attached to is forgotten, not stopped. */
 	async stop(): Promise<void> {
 		const child = this.child;
@@ -171,14 +285,55 @@ export class LlamaServerManager {
 		this.active = undefined;
 	}
 
-	private spawnServer(model: LiteModel): ChildProcess {
-		const args = buildServerArgs(model);
+	private spawnServer(model: LiteModel, isHost = false, onLogLine?: (line: string) => void): ChildProcess {
+		const args = buildServerArgs(model, isHost);
 		mkdirSync(dirname(this.logFile), { recursive: true });
+		this.spawnError = undefined;
+
+		if (onLogLine) {
+			const fd = openSync(this.logFile, "a");
+			let child: ChildProcess;
+			try {
+				writeSync(fd, `\n=== ${new Date().toISOString()} ${model.llamaServer} ${args.join(" ")}\n`);
+				this.logOffset = fstatSync(fd).size;
+				child = this.spawnFn(model.llamaServer, args, { stdio: ["ignore", "pipe", "pipe"] });
+			} catch (error) {
+				// The descriptor is closed when the child closes; without a child, close it here.
+				closeSync(fd);
+				throw error;
+			}
+			child.once("error", (error) => {
+				this.spawnError = error;
+			});
+			// Both streams go to the log file as they come, and to `onLogLine` one whole line at a time.
+			const forward = (stream: NodeJS.ReadableStream | null) => {
+				let buffered = "";
+				stream?.on("data", (chunk: Buffer) => {
+					try {
+						writeSync(fd, chunk);
+					} catch {}
+					buffered += chunk.toString("utf8");
+					const lines = buffered.split("\n");
+					buffered = lines.pop() ?? "";
+					for (const line of lines) {
+						if (line.trim()) onLogLine(line);
+					}
+				});
+			};
+			forward(child.stdout);
+			forward(child.stderr);
+			child.once("close", () => {
+				try {
+					closeSync(fd);
+				} catch {}
+			});
+			return child;
+		}
+
 		const fd = openSync(this.logFile, "a");
 		try {
 			writeSync(fd, `\n=== ${new Date().toISOString()} ${model.llamaServer} ${args.join(" ")}\n`);
 			this.logOffset = fstatSync(fd).size;
-			this.spawnError = undefined;
 			const child = this.spawnFn(model.llamaServer, args, { stdio: ["ignore", fd, fd] });
 			child.once("error", (error) => {
 				this.spawnError = error;

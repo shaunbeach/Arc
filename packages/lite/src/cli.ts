@@ -2,6 +2,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import pkg from "../package.json" with { type: "json" };
 import { Agent } from "./agent/agent.ts";
 import type { AgentEvent, StreamFn } from "./agent/types.ts";
 import { readLastUsed, writeLastUsed } from "./config/last-used.ts";
@@ -12,6 +13,7 @@ import { STARTER_MODELS_YML } from "./config/starter.ts";
 import { describeTrim } from "./context.ts";
 import { buildRequestBody, streamChat, toChatTools } from "./llm/llama-client.ts";
 import { LlamaServerManager, stopServerOnExit } from "./llm/server.ts";
+import { parseSwapLimit } from "./llm/swap-monitor.ts";
 import type { AssistantMessage } from "./llm/types.ts";
 import { buildSystemPrompt, estimateFixedPromptTokens } from "./prompt.ts";
 import {
@@ -38,6 +40,9 @@ Options:
   -c, --continue              Continue the most recent session in this directory
   -r, --resume                Pick a saved session to resume (interactive)
       --session <id|path>     Resume a specific session (id prefix or file path)
+      --serve [name]          Host a model on 0.0.0.0 with live server logs
+      --max-swap <size>       Free the model's memory when swap passes this, e.g. 4.5, 4.5GB, 512MB.
+                              Serving always does, at 4.5GB unless set; chat and agent work only with this flag
       --no-session            Do not save this session
       --models <path>         models.yml location (default: ./models.yml, then ~/.pi-lite/models.yml)
       --init                  Write a starter ~/.pi-lite/models.yml and exit
@@ -46,7 +51,7 @@ Options:
       --verbose               Print every request body to stderr (print mode)
   -h, --help                  Show this help
 
-Interactive commands: /model [name]  /mode [thinking|instruct]  /new  /resume [id]  /quit
+Interactive commands: /agent  /plan  /chat  /web [on|off]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /new  /resume [id]  /quit
 `;
 
 function dim(text: string): string {
@@ -175,8 +180,17 @@ async function runPrint(options: PrintOptions): Promise<number> {
 }
 
 async function main(argv: string[]): Promise<number> {
+	const normalizedArgv = argv.flatMap((arg, i) => {
+		if (arg === "--serve") {
+			const next = argv[i + 1];
+			if (!next || next.startsWith("-")) {
+				return ["--serve="];
+			}
+		}
+		return [arg];
+	});
 	const { values, positionals } = parseArgs({
-		args: argv,
+		args: normalizedArgv,
 		allowPositionals: true,
 		options: {
 			print: { type: "string", short: "p" },
@@ -185,6 +199,8 @@ async function main(argv: string[]): Promise<number> {
 			continue: { type: "boolean", short: "c" },
 			resume: { type: "boolean", short: "r" },
 			session: { type: "string" },
+			serve: { type: "string" },
+			"max-swap": { type: "string" },
 			"no-session": { type: "boolean" },
 			models: { type: "string" },
 			init: { type: "boolean" },
@@ -197,6 +213,11 @@ async function main(argv: string[]): Promise<number> {
 	if (values.help) {
 		process.stdout.write(HELP);
 		return 0;
+	}
+	if (values.serve !== undefined && values.resume) {
+		return fail(
+			"--serve cannot be combined with --resume (it opens a picker). Use --continue or --session <id> to load a session alongside it.",
+		);
 	}
 
 	const appDir = getAppDir();
@@ -229,26 +250,28 @@ async function main(argv: string[]): Promise<number> {
 	}
 
 	const savedModel = session?.settings ? findModel(config.models, session.settings.model) : undefined;
-	const model =
-		values.model === undefined
-			? (savedModel ?? lastModel ?? config.models[0])
-			: findModel(config.models, values.model);
-	if (!model) {
+	const explicitModel = values.model !== undefined ? findModel(config.models, values.model) : undefined;
+	if (values.model !== undefined && !explicitModel) {
 		const names = config.models.map((candidate) => candidate.name).join(", ");
 		return fail(`no model matches "${values.model}". Available: ${names}`);
 	}
+	const printModel = explicitModel ?? savedModel ?? lastModel ?? config.models[0];
 	if (values["show-prompt"]) {
-		showPrompt(model);
+		if (!printModel) return fail("No model available.");
+		showPrompt(printModel);
 		return 0;
 	}
 	if (values.mode !== undefined && !isSamplingMode(values.mode)) return fail("--mode must be thinking or instruct.");
-	let mode = defaultSamplingMode(model);
+	let mode = printModel ? defaultSamplingMode(printModel) : "thinking";
 	if (values.mode !== undefined && isSamplingMode(values.mode)) mode = values.mode;
-	else if (session?.settings && savedModel === model) mode = session.settings.mode;
-	else if (lastUsed && lastModel === model) mode = lastUsed.mode;
+	else if (session?.settings && savedModel && savedModel === printModel) mode = session.settings.mode;
+	else if (lastUsed && lastModel && lastModel === printModel) mode = lastUsed.mode;
 
 	const prompt = values.print ?? positionals.join(" ");
 	if (prompt && values.resume) return fail("--resume opens a picker; with -p, use --session <id> or --continue.");
+	if (prompt && values.serve !== undefined) {
+		return fail("--serve runs the interactive host server; cannot combine with -p.");
+	}
 	if (!prompt && !(process.stdin.isTTY && process.stdout.isTTY)) {
 		return fail("interactive mode needs a terminal. Pass a prompt with -p.");
 	}
@@ -259,8 +282,9 @@ async function main(argv: string[]): Promise<number> {
 	const saveSessions = values["no-session"] !== true;
 	try {
 		if (prompt) {
+			if (!printModel) return fail("No model available.");
 			return await runPrint({
-				model,
+				model: printModel,
 				mode,
 				prompt,
 				cwd,
@@ -270,17 +294,29 @@ async function main(argv: string[]): Promise<number> {
 				verbose: values.verbose === true,
 			});
 		}
-		// Print mode is often scripted, so only interactive sessions change what a plain pi-lite opens.
-		writeLastUsed(appDir, { model: model.name, mode });
+		// In interactive mode, only load a model if explicitly specified (--model) or resuming a session
+		const interactiveModel = explicitModel ?? savedModel;
+		if (interactiveModel) {
+			writeLastUsed(appDir, { model: interactiveModel.name, mode });
+		}
+		let maxSwapBytes: number | undefined;
+		if (values["max-swap"] !== undefined) {
+			maxSwapBytes = parseSwapLimit(values["max-swap"]);
+			if (maxSwapBytes === undefined) return fail("--max-swap must be a size such as 4.5, 4.5GB or 512MB.");
+		}
+
 		await runInteractive({
 			config,
-			model,
-			mode,
+			model: interactiveModel,
+			mode: interactiveModel ? mode : undefined,
 			cwd,
 			manager,
 			session,
 			saveSessions,
 			pickSession: values.resume === true,
+			serveModel: values.serve,
+			maxSwapBytes,
+			version: pkg.version,
 		});
 		return 0;
 	} finally {
