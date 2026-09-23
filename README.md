@@ -64,6 +64,29 @@ providers:
 
 pi-lite runs `llama-server -m <modelDir>/<id> <launchArgs>`, adding `--port` from `baseUrl` when it is missing, and waits for `/health`. It stops the server when you quit, switch models, or `/disconnect`. A running server that already serves the same GGUF is reused and is never stopped by pi-lite.
 
+## Connecting to a model on another machine
+
+A models.yml entry describes a GGUF that pi-lite can start. That does not work for a model running somewhere else: the path belongs to the other machine, and every change there -- a different quant, a wider window, a projector loaded -- has to be copied back by hand, or pi-lite refuses to attach.
+
+`discover: true` describes no model at all. On connect pi-lite asks the server's `/props` what it is running and takes the answer:
+
+```yaml
+providers:
+  remote:
+    baseUrl: http://192.168.1.27:8080/v1   # or a tunnel: ssh -N -L 8081:127.0.0.1:8080 host
+    auth: none
+    discover: true
+    name: Remote                           # what to type: /model Remote
+```
+
+```
+Connected to Ornith-1.5-9B-Q4_K_M at http://192.168.1.27:8080 · ctx 65.5k · reply 8.2k · thinking · vision · b10809-5266f24da
+```
+
+The GGUF name, the context window, whether it loaded a projector, and whether its template supports thinking all come from the server, so the banner and footer name the real model and `read` attaches images only when it can. Start something else there and `/model Remote` again: it asks afresh. pi-lite never starts a server for such an entry: it says `Nothing is serving at ...` when the address is quiet, and `Lost the connection to ...` when a server that had answered stops or the route to it goes down.
+
+`maxTokens` is the one thing `/props` does not advertise, being pi-lite's reply reserve rather than a server setting; left out it defaults to a quarter of the reported window, capped at 8192. Per-request variants are not discoverable either, so reasoning-effort levels still need one ordinary entry each.
+
 ## Sampling modes
 
 | Mode | temperature | top_p | top_k | min_p | presence_penalty | Thinking |
@@ -92,7 +115,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 
 | Command | Effect |
 |---|---|
-| `/model [name]` | Load or switch model (restarts llama-server). Without a name, opens a picker. |
+| `/model [name]` | Load or switch model (restarts llama-server). Without a name, opens a picker. A `discover` entry asks the server again. |
 | `/mode [thinking\|instruct]` | Switch sampling mode. Without an argument, toggles. |
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
@@ -172,7 +195,7 @@ Each tool result is capped at about a fifth of `contextWindow - maxTokens`, abou
 packages/lite          the app
   src/cli.ts           flags and print mode
   src/config/          models.yml loader, sampling presets
-  src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor
+  src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor, /props discovery
   src/agent/           agent loop
   src/tools/           read, edit, write, bash, web_search, web_fetch
   src/context.ts       context window trimming
