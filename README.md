@@ -135,7 +135,16 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `ctrl+d` | Exit when the editor is empty |
 | `shift+tab` | Switch sampling mode |
 
-Messages typed while the model works are sent with its next turn. The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.pi-lite/sessions/` (set `PI_LITE_DIR` to move them), and llama-server output goes to `~/.pi-lite/logs/llama-server.log`.
+You can keep typing while the model works. Each message you send is queued, and the status line counts them ("2 queued"):
+
+- When the model finishes a round of tool calls, the queued messages go in before its next step, so it reads them mid-task and can change course.
+- When it finishes a reply without tool calls, they are sent next as a new message.
+- While a model loads or `/compact` runs, they wait and go out when it is done.
+- If you press `esc` to abort, they come back into the editor instead of being sent.
+
+Commands such as `/web` or `/rag` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
+
+The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.pi-lite/sessions/` (set `PI_LITE_DIR` to move them), and llama-server output goes to `~/.pi-lite/logs/llama-server.log`.
 
 ## Modes
 
