@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { AgentTool, ToolResult } from "../src/agent/types.ts";
 import { validateToolArguments } from "../src/llm/validation.ts";
@@ -246,5 +247,64 @@ describe("bash", () => {
 		await expect(run(bash, { command: "cat > file << 'EOF'\n[elided from context: 83 lines]\nEOF" })).rejects.toThrow(
 			"command contains a placeholder for text elided from your context",
 		);
+	});
+});
+
+describe("paths pasted into the prompt", () => {
+	// macOS names screenshots with a narrow no-break space (U+202F) before AM or PM.
+	const screenshot = "Screenshot 2026-09-23 at 4.13.23\u202fAM.txt";
+	const withScreenshot = () => {
+		const options = setup();
+		mkdirSync(join(options.cwd, "Desktop"));
+		writeFileSync(join(options.cwd, "Desktop", screenshot), "pixels\n");
+		writeFileSync(join(options.cwd, "Desktop", "my notes.txt"), "notes\n");
+		return options;
+	};
+
+	it("reads a path the terminal escaped, quoted, or turned into a file URL", async () => {
+		const options = withScreenshot();
+		const read = createReadTool(options);
+		const full = join(options.cwd, "Desktop", "my notes.txt");
+		for (const path of ["Desktop/my\\ notes.txt", `'${full}'`, `"${full}"`, pathToFileURL(full).href]) {
+			expect(text(await run(read, { path })), path).toBe("notes");
+		}
+	});
+
+	it("finds a screenshot whose name was retyped with a plain space", async () => {
+		const options = withScreenshot();
+		const read = createReadTool(options);
+		expect(text(await run(read, { path: "Desktop/Screenshot 2026-09-23 at 4.13.23 AM.txt" }))).toBe("pixels");
+		expect(text(await run(read, { path: "Desktop/Screenshot\\ 2026-09-23\\ at\\ 4.13.23 AM.txt" }))).toBe("pixels");
+	});
+
+	it("suggests similar names when the name was garbled", async () => {
+		const options = withScreenshot();
+		await expect(
+			run(createReadTool(options), { path: "Desktop/Screenshot 2026-09-23 at 4.13.23.txt" }),
+		).rejects.toThrow(
+			`Not found: Desktop/Screenshot 2026-09-23 at 4.13.23.txt. Similar files there: "${screenshot}".`,
+		);
+		await expect(run(createReadTool(options), { path: "Desktop/zzz.txt" })).rejects.toThrow(
+			/^Not found: Desktop\/zzz\.txt$/,
+		);
+		await expect(
+			run(createEditTool(options), { path: "Desktop/Screenshot 2026-09-23.txt", oldText: "a", newText: "b" }),
+		).rejects.toThrow(`Similar files there: "${screenshot}"`);
+	});
+
+	it("edits and overwrites the file meant, and writes a new file under the name given", async () => {
+		const options = withScreenshot();
+		await run(createEditTool(options), {
+			path: "Desktop/Screenshot 2026-09-23 at 4.13.23 AM.txt",
+			oldText: "pixels",
+			newText: "edited",
+		});
+		expect(readFileSync(join(options.cwd, "Desktop", screenshot), "utf8")).toBe("edited\n");
+
+		await run(createWriteTool(options), { path: "Desktop/my\\ notes.txt", content: "rewritten\n" });
+		expect(readFileSync(join(options.cwd, "Desktop", "my notes.txt"), "utf8")).toBe("rewritten\n");
+
+		await run(createWriteTool(options), { path: "Desktop/new file.txt", content: "new\n" });
+		expect(readFileSync(join(options.cwd, "Desktop", "new file.txt"), "utf8")).toBe("new\n");
 	});
 });

@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { AgentTool } from "../agent/types.ts";
 import { isElisionPlaceholder } from "../context.ts";
 import type { CodingToolOptions } from "./options.ts";
-import { resolveToolPath } from "./path-utils.ts";
+import { findExistingPath, resolveToolPath } from "./path-utils.ts";
 
 const writeSchema = Type.Object({
 	path: Type.String({ description: "File path" }),
@@ -23,7 +23,8 @@ export function createWriteTool(options: CodingToolOptions): AgentTool<typeof wr
 					"content is a placeholder for text elided from your context, not file content. Send the complete file content.",
 				);
 			}
-			const absolutePath = resolveToolPath(path, options.cwd);
+			// An existing file under a pasted or retyped name is the one meant; a new file takes the name as given.
+			const absolutePath = findExistingPath(path, options.cwd) ?? resolveToolPath(path, options.cwd);
 			signal?.throwIfAborted();
 			await mkdir(dirname(absolutePath), { recursive: true });
 			await writeFile(absolutePath, content, "utf8");

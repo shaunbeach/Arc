@@ -4,7 +4,7 @@ import type { AgentTool } from "../agent/types.ts";
 import { isElisionPlaceholder } from "../context.ts";
 import { applyEdit, detectLineEnding, generateDiffString, normalizeToLF, restoreLineEndings } from "./edit-diff.ts";
 import type { CodingToolOptions } from "./options.ts";
-import { resolveToolPath } from "./path-utils.ts";
+import { resolveExistingToolPath, similarNamesHint } from "./path-utils.ts";
 
 const editSchema = Type.Object({
 	path: Type.String({ description: "File path" }),
@@ -73,11 +73,11 @@ export function createEditTool(options: CodingToolOptions): AgentTool<typeof edi
 					"oldText or newText is a placeholder for text elided from your context. Read the file and send the exact text.",
 				);
 			}
-			const absolutePath = resolveToolPath(path, options.cwd);
+			const absolutePath = resolveExistingToolPath(path, options.cwd);
 			const raw = await readFile(absolutePath, "utf8").catch((error: NodeJS.ErrnoException) => {
 				throw new Error(
 					error.code === "ENOENT"
-						? `Cannot edit ${path}: file not found.`
+						? `Cannot edit ${path}: file not found.${similarNamesHint(path, options.cwd)}`
 						: `Cannot edit ${path}: ${error.message}`,
 				);
 			});

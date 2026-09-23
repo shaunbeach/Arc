@@ -3,7 +3,7 @@ import { extname } from "node:path";
 import { Type } from "typebox";
 import type { AgentTool, ToolResult } from "../agent/types.ts";
 import type { CodingToolOptions, ToolLimits } from "./options.ts";
-import { resolveToolPath } from "./path-utils.ts";
+import { resolveExistingToolPath, similarNamesHint } from "./path-utils.ts";
 import { formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const readSchema = Type.Object({
@@ -93,9 +93,11 @@ export function createReadTool(options: CodingToolOptions): AgentTool<typeof rea
 			: "Read a file or list a directory. Long files are cut off; page with offset and limit.",
 		parameters: readSchema,
 		async execute(_toolCallId, { path, offset, limit }, signal) {
-			const absolutePath = resolveToolPath(path, options.cwd);
+			const absolutePath = resolveExistingToolPath(path, options.cwd);
 			const info = await stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
-				throw new Error(error.code === "ENOENT" ? `Not found: ${path}` : `Cannot read ${path}: ${error.message}`);
+				if (error.code !== "ENOENT") throw new Error(`Cannot read ${path}: ${error.message}`);
+				const hint = similarNamesHint(path, options.cwd);
+				throw new Error(hint ? `Not found: ${path}.${hint}` : `Not found: ${path}`);
 			});
 			signal?.throwIfAborted();
 			if (info.isDirectory()) return listDirectory(absolutePath);
