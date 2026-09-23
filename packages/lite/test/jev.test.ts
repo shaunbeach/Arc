@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatCompactionPrompt, LocalLlamaJevAsker } from "../src/jev/asker.ts";
+import { buildJevGBNF, formatCompactionPrompt, LocalLlamaJevAsker } from "../src/jev/asker.ts";
 import { compact } from "../src/jev/compact.ts";
 import type { CompactionState, JevAsker, JevQuestions } from "../src/jev/types.ts";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from "../src/llm/types.ts";
@@ -104,6 +104,29 @@ describe("compact", () => {
 describe("LocalLlamaJevAsker", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
+	});
+
+	it("builds a grammar llama.cpp accepts: rule names of letters, digits, and hyphens only", () => {
+		// llama-server rejected the whole grammar over one underscore in a rule name.
+		for (const keys of [[], ["call_t1", "result_t1"], ["call_t12", "result_t12", "call_t13"]]) {
+			for (const line of buildJevGBNF(keys).split("\n")) {
+				expect(line, line).toMatch(/^[A-Za-z0-9-]+ ::= /);
+			}
+		}
+	});
+
+	it("turns thinking off and names an empty answer", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+			bodies.push(JSON.parse(String(init.body)));
+			return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }));
+		});
+		const asker = new LocalLlamaJevAsker({ llamaUrl: "http://127.0.0.1:9" });
+		const questions: JevQuestions = { call_t1: { type: "noul", instructions: "keep?" } };
+		await expect(asker.ask({ context: "", goal: "g", history: [] }, questions)).rejects.toThrow(
+			"the model returned an empty answer",
+		);
+		expect(bodies[0].chat_template_kwargs).toEqual({ enable_thinking: false });
 	});
 
 	it("reserves reply tokens for the answers only", async () => {

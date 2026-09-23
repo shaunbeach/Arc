@@ -6,15 +6,16 @@ const TOKENS_PER_ANSWER = 16;
 /**
  * Builds a strict GBNF grammar constraining llama.cpp to output valid JSON
  * with exact question keys and binary scores (0 or 1).
- * Uses character class ["] to avoid quote-escaping ambiguity in llama.cpp's GBNF parser.
+ * Uses character class ["] to avoid quote-escaping ambiguity in llama.cpp's GBNF parser. Rule names may hold only
+ * letters, digits, and hyphens: an underscore makes llama-server reject the whole grammar.
  */
 export function buildJevGBNF(questionKeys: readonly string[]): string {
 	if (questionKeys.length === 0) {
 		return 'root ::= "{" ws ["] "answers" ["] ws ":" ws "{" ws "}" ws "}" ws\nws ::= [ \\t\\n\\r]*';
 	}
 
-	const entryRules = questionKeys.map((key, i) => `entry_${i} ::= ["] "${key}" ["] ws ":" ws answer`);
-	const entriesSequence = questionKeys.map((_, i) => `entry_${i}`).join(' ws "," ws ');
+	const entryRules = questionKeys.map((key, i) => `entry-${i} ::= ["] "${key}" ["] ws ":" ws answer`);
+	const entriesSequence = questionKeys.map((_, i) => `entry-${i}`).join(' ws "," ws ');
 
 	return [
 		'root ::= "{" ws ["] "answers" ["] ws ":" ws "{" ws entries ws "}" ws "}" ws',
@@ -121,6 +122,8 @@ export class LocalLlamaJevAsker implements JevAsker {
 					],
 					grammar,
 					temperature: 0.0,
+					// A thinking model would spend the small answer budget reasoning and return no JSON.
+					chat_template_kwargs: { enable_thinking: false },
 					max_tokens: maxTokens,
 				}),
 				signal: requestSignal,
@@ -143,6 +146,7 @@ export class LocalLlamaJevAsker implements JevAsker {
 						],
 						response_format: { type: "json_object" },
 						temperature: 0.0,
+						chat_template_kwargs: { enable_thinking: false },
 						max_tokens: maxTokens,
 					}),
 					signal: requestSignal,
@@ -159,6 +163,7 @@ export class LocalLlamaJevAsker implements JevAsker {
 				rawContent = data.choices?.[0]?.message?.content ?? "";
 			}
 
+			if (!rawContent.trim()) throw new Error("the model returned an empty answer");
 			const parsed = JSON.parse(rawContent) as {
 				answers?: Record<string, { noul?: number } | number>;
 			};
