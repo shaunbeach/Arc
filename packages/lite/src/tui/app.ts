@@ -177,12 +177,15 @@ class InteractiveApp {
 	private picking = false;
 	private stopped = false;
 	private finish = () => {};
+	/** The mode to keep when a `discover` entry connects: one picked on the command line, in a session, or before a reconnect. */
+	private connectMode: SamplingMode | undefined;
 
 	constructor(options: InteractiveOptions) {
 		this.options = options;
 		const { model, cwd } = options;
 		this.swapGuard = options.maxSwapBytes === undefined ? undefined : new SwapGuard(options.maxSwapBytes);
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
+		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
 			model,
 			mode,
@@ -771,7 +774,9 @@ class InteractiveApp {
 			this.notice(style.gray(`Already using ${modelLabel(this.agent.model)}.`));
 			return;
 		}
-		this.adoptModel(model);
+		// Reconnecting to the same discover entry keeps the mode in use.
+		this.connectMode = model.discover && model.name === this.agent.model?.name ? this.agent.mode : undefined;
+		this.adoptModel(model, this.connectMode);
 		void this.ensureServer();
 	}
 
@@ -790,7 +795,8 @@ class InteractiveApp {
 				return false;
 			}
 			const model = resolveDiscoveredModel(placeholder, props);
-			this.adoptModel(model);
+			this.adoptModel(model, this.connectMode);
+			this.connectMode = undefined;
 			this.notice(style.gray(describeDiscovered(model, props, origin)));
 			return true;
 		} finally {
@@ -800,9 +806,9 @@ class InteractiveApp {
 	}
 
 	/** Everything that changes when a model becomes the current one, once it is fully known. */
-	private adoptModel(model: LiteModel): void {
+	private adoptModel(model: LiteModel, mode = defaultSamplingMode(model)): void {
 		this.agent.model = model;
-		this.agent.mode = defaultSamplingMode(model);
+		this.agent.mode = mode;
 		this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
 		this.lastReply = undefined;
 		this.contextEstimate = undefined;

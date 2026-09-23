@@ -337,7 +337,8 @@ async function main(argv: string[]): Promise<number> {
 		await runInteractive({
 			config,
 			model: interactiveModel,
-			mode: interactiveModel ? mode : undefined,
+			// An unchosen mode for a discover entry is only the placeholder's; the app picks one once it connects.
+			mode: interactiveModel && (modeChosen || !interactiveModel.discover) ? mode : undefined,
 			cwd,
 			manager,
 			session,

@@ -119,6 +119,20 @@ describe("resolveDiscoveredModel", () => {
 		expect(model.input).toEqual(["text"]);
 		expect(model.reasoning).toBe(false);
 	});
+
+	it("sees a thinking switch in the chat template when the server's caps miss it", async () => {
+		// Qwen3.5 on b10809: supports_preserve_reasoning is false, yet the template reads enable_thinking and
+		// thinks unless told not to. Without the switch, /mode could never turn thinking off.
+		const qwen = {
+			...PROPS,
+			chat_template:
+				"{%- if enable_thinking is defined and enable_thinking is false %}<think>\n\n</think>{%- endif %}",
+			chat_template_caps: { supports_preserve_reasoning: false, supports_tools: true },
+		};
+		const props = await fetchServerProps("http://localhost:8081/v1", jsonFetch(qwen));
+		if (!props) throw new Error("expected props");
+		expect(resolveDiscoveredModel(PLACEHOLDER, props).reasoning).toBe(true);
+	});
 });
 
 describe("modelNameFromPath", () => {

@@ -13,7 +13,10 @@ export interface ServerProps {
 	contextWindow: number;
 	/** `modalities.vision`: whether the server loaded a projector. */
 	vision: boolean;
-	/** `chat_template_caps.supports_preserve_reasoning`: whether a thinking switch means anything. */
+	/**
+	 * Whether the model has a thinking switch: its chat template reads `enable_thinking`, or the server reports
+	 * `supports_preserve_reasoning`. Qwen3.5's template has the switch but reports false for the latter.
+	 */
 	reasoning: boolean;
 	/** `chat_template_caps.supports_reasoning_effort`: whether reasoning_effort levels apply. */
 	reasoningEffort: boolean;
@@ -26,6 +29,7 @@ interface RawProps {
 	model_path?: unknown;
 	model_alias?: unknown;
 	build_info?: unknown;
+	chat_template?: unknown;
 	modalities?: { vision?: unknown };
 	chat_template_caps?: {
 		supports_preserve_reasoning?: unknown;
@@ -71,7 +75,9 @@ export async function fetchServerProps(
 		modelPath,
 		contextWindow: Math.floor(contextWindow),
 		vision: asBoolean(raw.modalities?.vision),
-		reasoning: asBoolean(caps.supports_preserve_reasoning),
+		reasoning:
+			asBoolean(caps.supports_preserve_reasoning) ||
+			(typeof raw.chat_template === "string" && raw.chat_template.includes("enable_thinking")),
 		reasoningEffort: asBoolean(caps.supports_reasoning_effort),
 		tools: asBoolean(caps.supports_tools),
 		buildInfo: typeof raw.build_info === "string" ? raw.build_info : undefined,
