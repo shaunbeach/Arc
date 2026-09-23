@@ -2,6 +2,7 @@ import type { AgentTool } from "../agent/types.ts";
 import type { LiteModel } from "../config/models.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
+import { createKbSearchTool } from "./kb-search.ts";
 import { type CodingToolOptions, toolLimitsFor } from "./options.ts";
 import { createReadTool } from "./read.ts";
 import { createWebFetchTool } from "./web-fetch.ts";
@@ -23,6 +24,7 @@ export function createCodingTools(options: CodingToolOptions): AgentTool[] {
 		createBashTool(options),
 		createWebSearchTool(options),
 		createWebFetchTool(options),
+		...(options.knowledgeBase ? [createKbSearchTool(options.knowledgeBase, options.limits)] : []),
 	];
 }
 
@@ -30,12 +32,13 @@ export function createCodingTools(options: CodingToolOptions): AgentTool[] {
 export function createToolsForModel(
 	model: LiteModel,
 	cwd: string,
-	options: Pick<CodingToolOptions, "allowLocalNetwork"> = {},
+	options: Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase"> = {},
 ): AgentTool[] {
 	return createCodingTools({
 		cwd,
 		limits: toolLimitsFor(model.contextWindow, model.maxTokens),
 		acceptsImages: model.input.includes("image"),
 		allowLocalNetwork: options.allowLocalNetwork,
+		knowledgeBase: options.knowledgeBase,
 	});
 }

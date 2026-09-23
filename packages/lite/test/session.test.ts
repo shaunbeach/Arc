@@ -109,6 +109,17 @@ describe("SessionFile", () => {
 		expect(loadSession(file.path).settings?.web).toBeUndefined();
 	});
 
+	it("records rag on and reads a missing value as rag off", () => {
+		const file = SessionFile.create(appDir(), "/work/project", settings);
+		file.appendMessage(user("hi"));
+		expect(loadSession(file.path).settings?.rag).toBeUndefined();
+
+		file.updateSettings({ ...settings, rag: true });
+		expect(loadSession(file.path).settings).toEqual({ ...settings, rag: true });
+		file.updateSettings(settings);
+		expect(loadSession(file.path).settings?.rag).toBeUndefined();
+	});
+
 	it("resumes appending to an existing file and records a different model", () => {
 		const file = SessionFile.create(appDir(), "/work/project", settings);
 		file.appendMessage(user("hi"));

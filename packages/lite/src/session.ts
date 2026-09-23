@@ -37,6 +37,8 @@ export interface SessionSettings {
 	interactionMode?: InteractionMode;
 	/** False after `/web off`. Missing means the web tools are on. */
 	web?: boolean;
+	/** True after `/rag on`. Missing means kb_search is off. */
+	rag?: boolean;
 }
 
 function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boolean {
@@ -45,7 +47,8 @@ function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boole
 		a.model === b.model &&
 		a.mode === b.mode &&
 		(a.interactionMode ?? "agent") === (b.interactionMode ?? "agent") &&
-		(a.web ?? true) === (b.web ?? true)
+		(a.web ?? true) === (b.web ?? true) &&
+		(a.rag ?? false) === (b.rag ?? false)
 	);
 }
 
@@ -214,6 +217,7 @@ export function loadSession(path: string): LoadedSession {
 				settings.interactionMode = entry.interactionMode;
 			}
 			if (entry.web === false) settings.web = false;
+			if (entry.rag === true) settings.rag = true;
 		} else if (entry.type === "name" && typeof entry.name === "string") {
 			name = entry.name;
 		}

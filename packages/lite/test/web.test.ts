@@ -179,6 +179,33 @@ describe("interaction modes and tool filtering", () => {
 		expect(names).toEqual(["read", "edit", "write", "bash", "web_search", "web_fetch"]);
 	});
 
+	it("offers kb_search only while rag is on, in every mode", () => {
+		const knowledgeBase = { search: async () => ({ total: 0, hits: [] }), article: async () => undefined };
+		const tools = createCodingTools({
+			cwd: "/work",
+			limits: toolLimitsFor(12_000),
+			acceptsImages: false,
+			knowledgeBase,
+		});
+		const agent = new Agent({ model, mode: "thinking", cwd: "/work", tools });
+		expect(agent.activeTools.map((t) => t.name)).not.toContain("kb_search");
+		expect(agent.systemPrompt).not.toContain("kb_search");
+
+		agent.setRag(true);
+		expect(agent.activeTools.map((t) => t.name)).toContain("kb_search");
+		expect(agent.systemPrompt).toContain("kb_search");
+		agent.setInteractionMode("plan");
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read", "web_search", "web_fetch", "kb_search"]);
+		agent.setInteractionMode("chat");
+		agent.setWeb(false);
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["kb_search"]);
+		expect(agent.systemPrompt).not.toContain("no tools");
+		expect(agent.systemPrompt).toContain("no web access");
+
+		agent.setRag(false);
+		expect(agent.activeTools).toEqual([]);
+	});
+
 	it("filters tools appropriately in plan and chat modes", () => {
 		const tools = createCodingTools({ cwd: "/work", limits: toolLimitsFor(12_000), acceptsImages: false });
 		const agent = new Agent({

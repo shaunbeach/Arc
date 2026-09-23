@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { RagConfig } from "../rag/kiwix.ts";
 import { expandHome, getAppDir } from "./paths.ts";
 import {
 	isSamplingMode,
@@ -57,6 +58,8 @@ export interface ModelsConfig {
 	models: LiteModel[];
 	/** Non-fatal problems to show once at startup. */
 	warnings: string[];
+	/** The knowledge base for `/rag`, when models.yml has a `rag:` section. */
+	rag?: RagConfig;
 }
 
 export class ModelsConfigError extends Error {
@@ -136,7 +139,7 @@ export function hasFlag(args: readonly string[], flags: readonly string[]): bool
 }
 
 /**
- * Parse models.yml. Only `providers:` is read; other top-level keys (such as another tool's `ask:` block)
+ * Parse models.yml. Only `providers:` and `rag:` are read; other top-level keys (such as another tool's `ask:` block)
  * are ignored. Errors name the file and the offending key.
  */
 export function parseModelsConfig(text: string, path: string, options: ParseModelsOptions = {}): ModelsConfig {
@@ -364,7 +367,20 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 	}
 
 	if (models.length === 0) throw configError("providers", "defines no models");
-	return { path, models, warnings };
+
+	// `rag:` names the folder of .zim archives `/rag on` searches.
+	let rag: RagConfig | undefined;
+	if (root.rag !== undefined) {
+		if (!isRecord(root.rag)) throw configError("rag", "must be a mapping");
+		const folder = readString(root.rag, "zimFolder", "rag");
+		if (!folder) throw configError("rag.zimFolder", "is required");
+		rag = {
+			folder: resolve(configDir, expandHome(folder)),
+			kiwixServe: readString(root.rag, "kiwixServe", "rag") ?? "kiwix-serve",
+		};
+		if (!existsSync(rag.folder)) warnings.push(`rag.zimFolder not found: ${rag.folder}`);
+	}
+	return { path, models, warnings, ...(rag ? { rag } : {}) };
 }
 
 /** Exact name or id, then case-insensitive name, then a unique case-insensitive substring of a name. */

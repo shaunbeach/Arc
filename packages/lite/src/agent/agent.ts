@@ -7,6 +7,8 @@ import {
 	buildSystemPrompt,
 	estimateFixedPromptTokens,
 	type InteractionMode,
+	RAG_TOOLS,
+	type SystemPromptOptions,
 	TOOLS_BY_MODE,
 	WEB_TOOLS,
 } from "../prompt.ts";
@@ -24,6 +26,8 @@ export interface AgentOptions {
 	interactionMode?: InteractionMode;
 	/** Whether the model has the web tools. Default: yes. */
 	web?: boolean;
+	/** Whether the model has kb_search. Default: no. */
+	rag?: boolean;
 	cwd?: string;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -47,6 +51,7 @@ export class Agent {
 	mode: SamplingMode;
 	interactionMode: InteractionMode;
 	web: boolean;
+	rag: boolean;
 	cwd: string;
 	systemPrompt: string;
 	tools: AgentTool[];
@@ -63,11 +68,10 @@ export class Agent {
 		this.mode = options.mode ?? "thinking";
 		this.interactionMode = options.interactionMode ?? "agent";
 		this.web = options.web ?? true;
+		this.rag = options.rag ?? false;
 		this.cwd = options.cwd ?? process.cwd();
 		this.contextWindow = new ContextWindow({ cwd: this.cwd });
-		this.systemPrompt =
-			options.systemPrompt ??
-			buildSystemPrompt({ cwd: this.cwd, interactionMode: this.interactionMode, web: this.web });
+		this.systemPrompt = options.systemPrompt ?? buildSystemPrompt(this.promptOptions());
 		this.tools = options.tools ? [...options.tools] : [];
 		this.transcript = options.messages ? [...options.messages] : [];
 		this.streamFn = options.streamFn;
@@ -193,6 +197,16 @@ export class Agent {
 		this.rebuildSystemPrompt();
 	}
 
+	/** Give the model kb_search, or take it away (`/rag`). The prompt says which it has. */
+	setRag(rag: boolean): void {
+		this.rag = rag;
+		this.rebuildSystemPrompt();
+	}
+
+	private promptOptions(): SystemPromptOptions {
+		return { cwd: this.cwd, interactionMode: this.interactionMode, web: this.web, rag: this.rag };
+	}
+
 	/** Update working directory and regenerate system prompt. */
 	setCwd(cwd: string): void {
 		this.cwd = cwd;
@@ -201,14 +215,17 @@ export class Agent {
 	}
 
 	private rebuildSystemPrompt(): void {
-		this.systemPrompt = buildSystemPrompt({ cwd: this.cwd, interactionMode: this.interactionMode, web: this.web });
+		this.systemPrompt = buildSystemPrompt(this.promptOptions());
 	}
 
-	/** The tools available for the current interaction mode, without the web tools while web is off. */
+	/** The tools available for the current interaction mode, without the web tools while web is off or kb_search while rag is. */
 	get activeTools(): AgentTool[] {
 		const allowed = this.interactionMode === "agent" ? undefined : TOOLS_BY_MODE[this.interactionMode];
 		return this.tools.filter(
-			(tool) => (!allowed || allowed.includes(tool.name)) && (this.web || !WEB_TOOLS.includes(tool.name)),
+			(tool) =>
+				(!allowed || allowed.includes(tool.name)) &&
+				(this.web || !WEB_TOOLS.includes(tool.name)) &&
+				(this.rag || !RAG_TOOLS.includes(tool.name)),
 		);
 	}
 

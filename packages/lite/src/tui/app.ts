@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
 	CombinedAutocompleteProvider,
@@ -33,6 +34,7 @@ import {
 import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
 import type { InteractionMode } from "../prompt.ts";
+import { KiwixKnowledgeBase } from "../rag/kiwix.ts";
 import {
 	type LoadedSession,
 	listSessions,
@@ -44,7 +46,7 @@ import {
 	type SessionSummary,
 	sessionLabel,
 } from "../session.ts";
-import { createToolsForModel } from "../tools/index.ts";
+import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
 import {
 	type AiStatus,
@@ -126,6 +128,8 @@ export interface InteractiveOptions {
 class InteractiveApp {
 	private readonly options: InteractiveOptions;
 	private readonly appDir = getAppDir();
+	/** The archives `/rag` searches, when models.yml has a `rag:` section. kiwix-serve starts on first use. */
+	private readonly knowledgeBase: KiwixKnowledgeBase | undefined;
 	private readonly tui = new TuiMainScreen(new ProcessTerminal());
 	private readonly chat = new Container();
 	/**
@@ -184,6 +188,12 @@ class InteractiveApp {
 		this.options = options;
 		const { model, cwd } = options;
 		this.swapGuard = options.maxSwapBytes === undefined ? undefined : new SwapGuard(options.maxSwapBytes);
+		const rag = options.config.rag;
+		if (rag) {
+			const knowledgeBase = new KiwixKnowledgeBase(rag, { logFile: join(this.appDir, "logs", "kiwix-serve.log") });
+			this.knowledgeBase = knowledgeBase;
+			process.once("exit", () => knowledgeBase.stop());
+		}
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
 		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
@@ -192,6 +202,7 @@ class InteractiveApp {
 			cwd,
 			interactionMode: options.session?.settings?.interactionMode,
 			web: options.session?.settings?.web,
+			rag: rag !== undefined && options.session?.settings?.rag === true,
 			tools: model ? createToolsForModel(model, cwd, this.toolOptions()) : [],
 			messages: options.session?.messages,
 		});
@@ -535,6 +546,9 @@ class InteractiveApp {
 			case "web":
 				this.switchWeb(args);
 				return;
+			case "rag":
+				this.switchRag(args);
+				return;
 			case "model":
 				if (args) this.switchModel(args);
 				else this.pickModel();
@@ -571,8 +585,8 @@ class InteractiveApp {
 	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
 	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
 	 */
-	private toolOptions(): { allowLocalNetwork: () => boolean } {
-		return { allowLocalNetwork: () => this.agent.interactionMode === "agent" };
+	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase"> {
+		return { allowLocalNetwork: () => this.agent.interactionMode === "agent", knowledgeBase: this.knowledgeBase };
 	}
 
 	/** What the session file records: the model, its sampling mode, and the interaction mode. */
@@ -582,6 +596,7 @@ class InteractiveApp {
 			mode: this.agent.mode,
 			interactionMode: this.agent.interactionMode,
 			...(this.agent.web ? {} : { web: false }),
+			...(this.agent.rag ? { rag: true } : {}),
 		};
 	}
 
@@ -589,7 +604,8 @@ class InteractiveApp {
 		const mode = this.agent.interactionMode;
 		const inMode = mode === "agent" ? "" : ` in ${mode} mode`;
 		const named = this.sessionName ? ` "${this.sessionName}"` : "";
-		return `Resumed session ${id.slice(0, 8)}${named}${inMode}${this.agent.web ? "" : ", web off"}.`;
+		const tools = `${this.agent.web ? "" : ", web off"}${this.agent.rag ? ", rag on" : ""}`;
+		return `Resumed session ${id.slice(0, 8)}${named}${inMode}${tools}.`;
 	}
 
 	/** `/web on`, `/web off`, or `/web` to switch. Applies from the next request; the session file records it. */
@@ -610,6 +626,53 @@ class InteractiveApp {
 		this.notice(
 			style.gray(web ? `Web tools on${note}.` : `Web tools off${note}: the model cannot search or fetch pages.`),
 		);
+		this.updateFooter();
+	}
+
+	/**
+	 * `/rag on`, `/rag off`, or `/rag` to switch: give the model kb_search over the models.yml `rag:` archives.
+	 * kiwix-serve starts here rather than at the first search, so a missing binary or an empty folder shows now.
+	 */
+	private switchRag(arg: string): void {
+		const knowledgeBase = this.knowledgeBase;
+		if (!knowledgeBase) {
+			this.notice(
+				style.yellow(
+					"No knowledge base is set up. Add this to models.yml:\n  rag:\n    zimFolder: <folder of .zim files>",
+				),
+			);
+			return;
+		}
+		const choice = arg.trim().toLowerCase();
+		if (choice && choice !== "on" && choice !== "off") {
+			this.notice(style.yellow("Use /rag on, /rag off, or /rag to switch."));
+			return;
+		}
+		const rag = choice ? choice === "on" : !this.agent.rag;
+		if (rag === this.agent.rag) {
+			this.notice(style.gray(`The knowledge base is already ${rag ? "on" : "off"}.`));
+			return;
+		}
+		let archives = 0;
+		if (rag) {
+			try {
+				archives = knowledgeBase.archives().length;
+			} catch (error) {
+				this.notice(style.red(errorText(error)));
+				return;
+			}
+		}
+		this.agent.setRag(rag);
+		if (this.agent.model) this.session?.updateSettings(this.sessionSettings(this.agent.model));
+		const note = this.agent.isRunning ? " (from the next message)" : "";
+		if (rag) {
+			this.notice(style.gray(`Knowledge base on${note}: ${archives} archives the model can search with kb_search.`));
+			knowledgeBase.start().catch((error: unknown) => this.notice(style.red(`Knowledge base: ${errorText(error)}`)));
+		} else {
+			// A search in flight would fail if kiwix-serve went away under it; it stops with the app instead.
+			if (!this.agent.isRunning) knowledgeBase.stop();
+			this.notice(style.gray(`Knowledge base off${note}.`));
+		}
 		this.updateFooter();
 	}
 
@@ -1059,13 +1122,17 @@ class InteractiveApp {
 		if (leftMode) this.agent.setInteractionMode("agent");
 		const webBack = !this.agent.web;
 		if (webBack) this.agent.setWeb(true);
+		const ragOff = this.agent.rag;
+		if (ragOff) this.agent.setRag(false);
 		if (this.options.saveSessions && this.agent.model) {
 			this.session = SessionFile.create(this.appDir, this.options.cwd, this.sessionSettings(this.agent.model));
 		} else {
 			this.session = undefined;
 		}
 		this.resetTranscript();
-		const back = [leftMode ? "agent mode" : "", webBack ? "web tools on" : ""].filter(Boolean).join(", ");
+		const back = [leftMode ? "agent mode" : "", webBack ? "web tools on" : "", ragOff ? "knowledge base off" : ""]
+			.filter(Boolean)
+			.join(", ");
 		this.notice(style.gray(back ? `New session. Back to ${back}.` : "New session."));
 		this.updateFooter();
 	}
@@ -1141,6 +1208,7 @@ class InteractiveApp {
 		this.agent.mode = savedModel && saved ? saved.mode : this.agent.mode;
 		this.agent.setInteractionMode(saved?.interactionMode ?? "agent");
 		this.agent.setWeb(saved?.web ?? true);
+		this.agent.setRag(this.knowledgeBase !== undefined && saved?.rag === true);
 		if (model && modelChanged) this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
 		if (this.options.saveSessions && model) {
 			this.session = SessionFile.resume(loaded, this.sessionSettings(model));
@@ -1273,6 +1341,7 @@ class InteractiveApp {
 				mode: this.agent.mode,
 				interactionMode: this.agent.interactionMode,
 				web: this.agent.web,
+				rag: this.agent.rag,
 				serving: this.serving,
 				aiStatus: this.aiStatus,
 				contextTokens: this.contextEstimate,
@@ -1289,6 +1358,7 @@ class InteractiveApp {
 		if (this.isServing) {
 			void this.stopServe();
 		}
+		this.knowledgeBase?.stop();
 		// Leave the final frame on screen as it is now (for example with the submitted /quit cleared).
 		this.status.setText("");
 		this.tui.renderNow();

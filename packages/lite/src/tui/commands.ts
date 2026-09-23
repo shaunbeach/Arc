@@ -7,6 +7,7 @@ export type CommandName =
 	| "plan"
 	| "chat"
 	| "web"
+	| "rag"
 	| "model"
 	| "mode"
 	| "serve"
@@ -22,6 +23,7 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	{ name: "plan", description: "Switch to plan mode (design & planning, read-only tools)" },
 	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
 	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
+	{ name: "rag", description: "Let the model search the offline knowledge base", argumentHint: "[on|off]" },
 	{ name: "model", description: "Switch model (restarts llama-server)", argumentHint: "[name]" },
 	{ name: "mode", description: "Switch between thinking and instruct sampling", argumentHint: "[thinking|instruct]" },
 	{ name: "serve", description: "Serve a model as a remote host with live server logs", argumentHint: "[name]" },
@@ -90,6 +92,7 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		serve: complete(models.map((model) => model.name)),
 		mode: complete(SAMPLING_MODES),
 		web: complete(["on", "off"]),
+		rag: complete(["on", "off"]),
 	};
 	return COMMANDS.map((command) => ({
 		name: command.name,

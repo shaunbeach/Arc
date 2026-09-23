@@ -41,6 +41,34 @@ describe("system prompt", () => {
 		}
 	});
 
+	it("mentions kb_search only while rag is on, for about a hundred more tokens", () => {
+		const knowledgeBase = { search: async () => ({ total: 0, hits: [] }), article: async () => undefined };
+		const withKb = createCodingTools({
+			cwd: "/work/project",
+			limits: toolLimitsFor(12_000),
+			acceptsImages: false,
+			knowledgeBase,
+		});
+		expect(withKb.map((tool) => tool.name)).toContain("kb_search");
+		for (const mode of ["agent", "plan", "chat"] as const) {
+			for (const web of [true, false]) {
+				const off = buildSystemPrompt({ cwd: "/work/project", platform: "darwin", interactionMode: mode, web });
+				const on = buildSystemPrompt({
+					cwd: "/work/project",
+					platform: "darwin",
+					interactionMode: mode,
+					web,
+					rag: true,
+				});
+				expect(off).not.toContain("kb_search");
+				expect(on).toContain("kb_search");
+			}
+		}
+		const rag = buildSystemPrompt({ cwd: "/work/project", platform: "darwin", rag: true });
+		const added = estimateFixedPromptTokens(rag, withKb) - estimateFixedPromptTokens(systemPrompt, tools);
+		expect(added).toBeLessThan(150);
+	});
+
 	it("names the OS and the working directory", () => {
 		expect(systemPrompt).toContain("OS: darwin");
 		expect(systemPrompt).toContain("Working directory: /work/project");

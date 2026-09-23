@@ -519,6 +519,8 @@ export interface FooterState {
 	aiStatus?: AiStatus;
 	/** False after `/web off`. */
 	web?: boolean;
+	/** True after `/rag on`. */
+	rag?: boolean;
 	/** The model hosted with `/serve`, while it runs. */
 	serving?: { modelName: string; port: string };
 	/** Estimated prompt size after `/compact`, shown until the next reply reports what the server measured. */
@@ -575,6 +577,7 @@ export function formatFooter(state: FooterState): string {
 			parts.push(style.yellow(`[${state.interactionMode}]`));
 		}
 		if (state.web === false) parts.push(style.yellow("[no web]"));
+		if (state.rag) parts.push(style.cyan("[rag]"));
 		parts.push(statusBracket);
 
 		const usage = state.lastReply?.usage;

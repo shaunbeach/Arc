@@ -1,3 +1,5 @@
+import type { KnowledgeBase } from "../rag/kiwix.ts";
+
 export interface ToolLimits {
 	/** Most lines one tool result may return. */
 	maxLines: number;
@@ -16,6 +18,8 @@ export interface CodingToolOptions {
 	 * agent mode, where bash reaches them anyway.
 	 */
 	allowLocalNetwork?: () => boolean;
+	/** The offline archives kb_search reads (models.yml `rag:`). Without one, there is no kb_search. */
+	knowledgeBase?: KnowledgeBase;
 }
 
 const MIN_OUTPUT_BYTES = 4 * 1024;

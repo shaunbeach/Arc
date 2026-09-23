@@ -221,3 +221,18 @@ describe("flagValue", () => {
 		expect(flagValue(["--jinja"], ["--port"])).toBeUndefined();
 	});
 });
+
+describe("rag", () => {
+	it("reads the knowledge base folder, relative to models.yml, and a kiwix-serve path", () => {
+		expect(parse(CONFIG).rag).toBeUndefined();
+		const config = parse(`${CONFIG}\nrag:\n  zimFolder: zims\n  kiwixServe: /opt/kiwix/kiwix-serve\n`);
+		expect(config.rag).toEqual({ folder: "/cfg/zims", kiwixServe: "/opt/kiwix/kiwix-serve" });
+		expect(config.warnings).toContain("rag.zimFolder not found: /cfg/zims");
+		expect(parse(`${CONFIG}\nrag:\n  zimFolder: /z\n`).rag?.kiwixServe).toBe("kiwix-serve");
+	});
+
+	it("needs a folder", () => {
+		expect(() => parse(`${CONFIG}\nrag:\n  kiwixServe: kiwix-serve\n`)).toThrow("rag.zimFolder is required");
+		expect(() => parse(`${CONFIG}\nrag: yes\n`)).toThrow("rag must be a mapping");
+	});
+});
