@@ -144,58 +144,50 @@ describe("Line and footer", () => {
 		expect(line.render(20)).toEqual([]);
 	});
 
-	it("shows model, mode, status, context fill, speed, and directory", () => {
+	it("shows model, mode, status, context fill, and speed, but not the directory", () => {
 		const reply = assistant([], {
 			usage: { promptTokens: 5000, cachedTokens: 4800, completionTokens: 300 },
 			timings: { promptPerSecond: 900, predictedPerSecond: 21.46 },
 		});
+		expect(formatFooter({ model, mode: "thinking", lastReply: reply }).replace(/\x1b\[\d+m/g, "")).toBe(
+			" Qwen-27B · thinking · [idle] · ctx 5.3k/12.3k · 21.5 tok/s",
+		);
 		expect(
-			formatFooter({ model, mode: "thinking", cwd: "/srv/app", lastReply: reply }).replace(/\x1b\[\d+m/g, ""),
-		).toBe(" Qwen-27B · thinking · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+			formatFooter({ model, mode: "thinking", aiStatus: "thinking", lastReply: reply }).replace(/\x1b\[\d+m/g, ""),
+		).toBe(" Qwen-27B · thinking · [thinking] · ctx 5.3k/12.3k · 21.5 tok/s");
 		expect(
-			formatFooter({ model, mode: "thinking", aiStatus: "thinking", cwd: "/srv/app", lastReply: reply }).replace(
+			formatFooter({ model, mode: "thinking", aiStatus: "working", lastReply: reply }).replace(/\x1b\[\d+m/g, ""),
+		).toBe(" Qwen-27B · thinking · [working] · ctx 5.3k/12.3k · 21.5 tok/s");
+		expect(
+			formatFooter({ model, mode: "thinking", interactionMode: "plan", lastReply: reply }).replace(
 				/\x1b\[\d+m/g,
 				"",
 			),
-		).toBe(" Qwen-27B · thinking · [thinking] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		).toBe(" Qwen-27B · thinking · [plan] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s");
 		expect(
-			formatFooter({ model, mode: "thinking", aiStatus: "working", cwd: "/srv/app", lastReply: reply }).replace(
+			formatFooter({ model, mode: "thinking", interactionMode: "chat", lastReply: reply }).replace(
 				/\x1b\[\d+m/g,
 				"",
 			),
-		).toBe(" Qwen-27B · thinking · [working] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+		).toBe(" Qwen-27B · thinking · [chat] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s");
 		expect(
-			formatFooter({ model, mode: "thinking", interactionMode: "plan", cwd: "/srv/app", lastReply: reply }).replace(
-				/\x1b\[\d+m/g,
-				"",
-			),
-		).toBe(" Qwen-27B · thinking · [plan] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
+			formatFooter({ model, mode: "thinking", aiStatus: "serving", lastReply: reply }).replace(/\x1b\[\d+m/g, ""),
+		).toBe(" Qwen-27B · thinking · [serving] · ctx 5.3k/12.3k · 21.5 tok/s");
+		expect(formatFooter({}).replace(/\x1b\[\d+m/g, "")).toBe(" no model");
 		expect(
-			formatFooter({ model, mode: "thinking", interactionMode: "chat", cwd: "/srv/app", lastReply: reply }).replace(
-				/\x1b\[\d+m/g,
-				"",
-			),
-		).toBe(" Qwen-27B · thinking · [chat] · [idle] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
-		expect(
-			formatFooter({ model, mode: "thinking", aiStatus: "serving", cwd: "/srv/app", lastReply: reply }).replace(
-				/\x1b\[\d+m/g,
-				"",
-			),
-		).toBe(" Qwen-27B · thinking · [serving] · ctx 5.3k/12.3k · 21.5 tok/s · /srv/app");
-		expect(formatFooter({ cwd: "/srv/app" }).replace(/\x1b\[\d+m/g, "")).toBe(" no model · /srv/app");
-		expect(
-			formatFooter({ model, mode: "instruct", interactionMode: "plan", web: false, cwd: "/srv/app" }).replace(
-				/\x1b\[\d+m/g,
-				"",
-			),
-		).toBe(" Qwen-27B · instruct · [plan] · [no web] · [idle] · /srv/app");
+			formatFooter({ model, mode: "instruct", interactionMode: "plan", web: false }).replace(/\x1b\[\d+m/g, ""),
+		).toBe(" Qwen-27B · instruct · [plan] · [no web] · [idle]");
 		// While hosting, the footer names the served model, with or without a model selected for prompts.
 		const serving = { modelName: "Qwen-27B-host", port: "18555" };
 		for (const selected of [undefined, model]) {
-			expect(
-				formatFooter({ model: selected, mode: "thinking", cwd: "/srv/app", serving }).replace(/\x1b\[\d+m/g, ""),
-			).toBe(" serving Qwen-27B-host · port 18555 · [serving] · /srv/app");
+			expect(formatFooter({ model: selected, mode: "thinking", serving }).replace(/\x1b\[\d+m/g, "")).toBe(
+				" serving Qwen-27B-host · port 18555 · [serving]",
+			);
 		}
+		// After /compact, the estimate stands in for the last measured size until the next reply.
+		expect(
+			formatFooter({ model, mode: "thinking", lastReply: reply, contextTokens: 4321 }).replace(/\x1b\[\d+m/g, ""),
+		).toBe(" Qwen-27B · thinking · [idle] · ctx ~4.3k/12.3k · 21.5 tok/s");
 		expect(formatTokens(999)).toBe("999");
 	});
 });
@@ -212,15 +204,15 @@ describe("commands", () => {
 		expect(parseCommand("/host")).toEqual({ name: "serve", args: "" });
 		expect(parseCommand("/disconnect")).toEqual({ name: "disconnect", args: "" });
 		expect(parseCommand("/stop")).toEqual({ name: "disconnect", args: "" });
-		// /clear and its old aliases are the same command as /new.
-		expect(parseCommand("/clear")).toEqual({ name: "new", args: "" });
-		expect(parseCommand("/reset")).toEqual({ name: "new", args: "" });
-		expect(parseCommand("/cls")).toEqual({ name: "new", args: "" });
+		// /new, /cls, and /reset are the same command as /clear.
+		expect(parseCommand("/clear")).toEqual({ name: "clear", args: "" });
+		expect(parseCommand("/reset")).toEqual({ name: "clear", args: "" });
+		expect(parseCommand("/cls")).toEqual({ name: "clear", args: "" });
 		expect(parseCommand("/compact")).toEqual({ name: "compact", args: "" });
 		expect(parseCommand("/compact 0.7")).toEqual({ name: "compact", args: "0.7" });
 		expect(parseCommand("/compress")).toEqual({ name: "compact", args: "" });
 		expect(parseCommand("/prune")).toEqual({ name: "compact", args: "" });
-		expect(parseCommand("/new")).toEqual({ name: "new", args: "" });
+		expect(parseCommand("/new")).toEqual({ name: "clear", args: "" });
 		expect(parseCommand("/web")).toEqual({ name: "web", args: "" });
 		expect(parseCommand("/web off")).toEqual({ name: "web", args: "off" });
 		expect(parseCommand("/exit")).toEqual({ name: "quit", args: "" });

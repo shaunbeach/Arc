@@ -22,10 +22,12 @@ import { describeTrim } from "../context.ts";
 import { getLocalIpAddress, type LlamaServerManager, serverOrigin, serverPort } from "../llm/server.ts";
 import {
 	DEFAULT_SWAP_THRESHOLD_BYTES,
+	describeMemory,
 	formatGigabytes,
 	readSwapUsage,
 	SwapGuard,
 	SwapMonitor,
+	underPressure,
 } from "../llm/swap-monitor.ts";
 import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
@@ -134,6 +136,8 @@ class InteractiveApp {
 	private banner: BannerView | undefined;
 	private session: SessionFile | undefined;
 	private lastReply: AssistantMessage | undefined;
+	/** The prompt size `/compact` estimated, shown in the footer until the next reply measures it. */
+	private contextEstimate: number | undefined;
 	/** Wall time of the last finished turn, shown in the footer. */
 	private lastTurnMs: number | undefined;
 	private streamingView: AssistantView | undefined;
@@ -188,6 +192,7 @@ class InteractiveApp {
 				: SessionFile.create(this.appDir, cwd, settings);
 		}
 		this.lastReply = options.session ? lastReplyWithUsage(options.session.messages) : undefined;
+		this.contextEstimate = undefined;
 		recordSession(this.agent, () => this.session);
 		this.agent.subscribe((event) => this.onAgentEvent(event));
 
@@ -366,7 +371,7 @@ class InteractiveApp {
 		const limitStr = formatGigabytes(threshold);
 		this.notice(
 			style.yellow(
-				`[Memory Guard] Swap threshold exceeded (${formatGigabytes(usage.usedBytes)} >= ${limitStr}). Stopping the server to reclaim memory.`,
+				`[Memory Guard] Memory is short (${describeMemory(usage)}; limit ${limitStr}). Stopping the server to reclaim it.`,
 			),
 		);
 		const cooldown = new AbortController();
@@ -379,11 +384,11 @@ class InteractiveApp {
 			this.swapCooldown = undefined;
 		}
 		const postUsage = await readSwapUsage();
-		const postStr = postUsage ? ` (swap now ${formatGigabytes(postUsage.usedBytes)})` : "";
+		const postStr = postUsage ? ` (now ${describeMemory(postUsage)})` : "";
 		if (guard.recycled(postUsage)) {
 			this.notice(
 				style.yellow(
-					`[Memory Guard] Server stopped${postStr}. Swap stays over ${limitStr} from other applications, so the guard pauses until it drops.`,
+					`[Memory Guard] Server stopped${postStr}. Memory is still short without it, so other applications hold it; the guard pauses until that changes.`,
 				),
 			);
 		} else {
@@ -467,7 +472,10 @@ class InteractiveApp {
 				if (event.message.role === "assistant") {
 					this.streamingView?.update(event.message, false);
 					this.streamingView = undefined;
-					if (event.message.usage.promptTokens > 0) this.lastReply = event.message;
+					if (event.message.usage.promptTokens > 0) {
+						this.lastReply = event.message;
+						this.contextEstimate = undefined;
+					}
 					this.updateFooter();
 				}
 				break;
@@ -522,7 +530,7 @@ class InteractiveApp {
 			case "mode":
 				this.switchMode(args);
 				return;
-			case "new":
+			case "clear":
 				this.newSession();
 				return;
 			case "resume":
@@ -617,6 +625,7 @@ class InteractiveApp {
 			if (controller.signal.aborted) throw new Error("Compaction cancelled.");
 			this.setStatus("Compacting context…");
 			const res = await this.agent.compact({ keepThreshold: threshold, signal: controller.signal });
+			if (res.compactedCalls > 0) this.contextEstimate = res.estimatedTokens;
 			const how =
 				res.fallbackReason !== undefined
 					? `heuristic, because ${res.fallbackReason}`
@@ -688,6 +697,7 @@ class InteractiveApp {
 		this.agent.model = undefined;
 		this.agent.tools = [];
 		this.lastReply = undefined;
+		this.contextEstimate = undefined;
 		this.lastTurnMs = undefined;
 		this.setAiStatus("idle");
 		// The banner is at the top; rewriting it once the transcript has grown would redraw the whole screen.
@@ -746,6 +756,7 @@ class InteractiveApp {
 		this.agent.mode = defaultSamplingMode(model);
 		this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
 		this.lastReply = undefined;
+		this.contextEstimate = undefined;
 		this.lastTurnMs = undefined;
 		if (this.options.saveSessions && !this.session) {
 			this.session = SessionFile.create(this.appDir, this.options.cwd, this.sessionSettings(model));
@@ -859,18 +870,18 @@ class InteractiveApp {
 				const usedStr = formatGigabytes(usage.usedBytes);
 				const limitStr = formatGigabytes(thresholdBytes);
 				const isHigh = usage.usedBytes >= thresholdBytes * 0.8;
-				const styleColor = usage.usedBytes >= thresholdBytes ? style.red : isHigh ? style.yellow : style.dim;
-				serveView.setSwapText(styleColor(`Swap: ${usedStr} / ${limitStr} limit`));
+				const styleColor = underPressure(usage, thresholdBytes) ? style.red : isHigh ? style.yellow : style.dim;
+				const free = usage.freePercent === undefined ? "" : ` · ${Math.round(usage.freePercent)}% free`;
+				serveView.setSwapText(styleColor(`Swap: ${usedStr} / ${limitStr} limit${free}`));
 				this.tui.requestRender();
 			},
 			onThresholdExceeded: async (usage) => {
 				if (!this.isServing || this.serveAbortController?.signal.aborted) return;
-				const usedStr = formatGigabytes(usage.usedBytes);
 				const limitStr = formatGigabytes(thresholdBytes);
 
-				serveView.addLogLine(`[Memory Guard] Swap threshold exceeded (${usedStr} >= ${limitStr}).`);
+				serveView.addLogLine(`[Memory Guard] Memory is short (${describeMemory(usage)}; limit ${limitStr}).`);
 				serveView.addLogLine("[Memory Guard] Waiting for in-flight requests to finish…");
-				this.setStatus("Swap threshold exceeded · waiting for in-flight requests to finish…", "esc to stop");
+				this.setStatus("Memory is short · waiting for in-flight requests to finish…", "esc to stop");
 
 				const isIdle = await this.options.manager.waitForIdle(60_000, this.serveAbortController?.signal);
 				if (this.serveAbortController?.signal.aborted) return;
@@ -878,13 +889,13 @@ class InteractiveApp {
 					serveView.addLogLine("[Memory Guard] Timed out waiting for active requests. Forcing stop…");
 				}
 
-				serveView.addLogLine("[Memory Guard] Stopping server to reclaim swap…");
-				this.setStatus("Stopping server to reclaim swap…", "esc to stop");
+				serveView.addLogLine("[Memory Guard] Stopping server to reclaim memory…");
+				this.setStatus("Stopping server to reclaim memory…", "esc to stop");
 				await this.options.manager.stop();
 				if (this.serveAbortController?.signal.aborted) return;
 
-				serveView.addLogLine("[Memory Guard] Pausing 15s for macOS to deallocate swapfiles…");
-				this.setStatus("Reclaiming swap memory (15s cooldown)…", "esc to stop");
+				serveView.addLogLine("[Memory Guard] Pausing 15s for the system to settle…");
+				this.setStatus("Reclaiming memory (15s cooldown)…", "esc to stop");
 				try {
 					await delay(15_000, undefined, { signal: this.serveAbortController?.signal });
 				} catch {
@@ -893,16 +904,16 @@ class InteractiveApp {
 				if (this.serveAbortController?.signal.aborted) return;
 
 				const postUsage = await readSwapUsage();
-				const postStr = postUsage ? formatGigabytes(postUsage.usedBytes) : "unknown";
-				serveView.addLogLine(`[Memory Guard] Swap after recycle: ${postStr}. Restarting host server…`);
-				this.setStatus(`Restarting host server (swap: ${postStr})…`, "esc to stop");
+				const postStr = postUsage ? describeMemory(postUsage) : "memory unknown";
+				serveView.addLogLine(`[Memory Guard] With the server stopped: ${postStr}. Restarting host server…`);
+				this.setStatus(`Restarting host server (${postStr})…`, "esc to stop");
 
 				try {
 					await startHostServer();
 					serveView.addLogLine("[Memory Guard] Server restarted successfully and ready for requests.");
-					if (postUsage && postUsage.usedBytes >= thresholdBytes) {
+					if (postUsage && underPressure(postUsage, thresholdBytes)) {
 						serveView.addLogLine(
-							`[Memory Guard] Notice: Swap remains at ${postStr} from other applications. Auto-recycle paused until swap drops.`,
+							"[Memory Guard] Memory stayed short with the server stopped, so other applications hold it. Auto-recycle paused until that changes.",
 						);
 					} else {
 						this.swapMonitor?.resume();
@@ -916,21 +927,19 @@ class InteractiveApp {
 				}
 			},
 			onRecovered: (usage) => {
-				serveView.addLogLine(
-					`[Memory Guard] Swap dropped back to ${formatGigabytes(usage.usedBytes)}. Memory guard re-armed.`,
-				);
+				serveView.addLogLine(`[Memory Guard] Memory recovered (${describeMemory(usage)}). Memory guard re-armed.`);
 			},
 		});
 
 		try {
-			// Swap is system-wide. If other applications already hold more than the limit, recycling the new server
-			// would only reload it, so the guard starts paused until swap drops.
+			// Memory is system-wide. If it is already short before the server starts, other applications hold it, and
+			// recycling the new server would only reload it, so the guard starts paused until that changes.
 			const initialSwap = await readSwapUsage();
-			const alreadyOver = initialSwap !== undefined && initialSwap.usedBytes >= thresholdBytes;
+			const alreadyOver = initialSwap !== undefined && underPressure(initialSwap, thresholdBytes);
 			await startHostServer();
 			if (alreadyOver) {
 				serveView.addLogLine(
-					`[Memory Guard] Swap is already ${formatGigabytes(initialSwap.usedBytes)} (limit ${formatGigabytes(thresholdBytes)}) from other applications. Guard paused until it drops.`,
+					`[Memory Guard] Memory is already short (${describeMemory(initialSwap)}; limit ${formatGigabytes(thresholdBytes)}) from other applications. Guard paused until that changes.`,
 				);
 			}
 			this.swapMonitor.start({ paused: alreadyOver });
@@ -981,11 +990,12 @@ class InteractiveApp {
 		this.tui.requestRender();
 	}
 
-	/** `/new`, also reached as `/clear`, `/cls`, and `/reset`. */
+	/** `/clear`, also reached as `/new`, `/cls`, and `/reset`. */
 	private newSession(): void {
 		if (!this.requireIdle()) return;
 		this.agent.setMessages([]);
 		this.lastReply = undefined;
+		this.contextEstimate = undefined;
 		this.lastTurnMs = undefined;
 		this.setAiStatus("idle");
 		// The interaction mode and web setting belong to a session, so a new one starts in agent mode with web on.
@@ -1049,6 +1059,7 @@ class InteractiveApp {
 			this.session = SessionFile.resume(loaded, this.sessionSettings(model));
 		}
 		this.lastReply = lastReplyWithUsage(loaded.messages);
+		this.contextEstimate = undefined;
 
 		this.resetTranscript();
 		this.showTranscript(loaded.messages);
@@ -1093,7 +1104,7 @@ class InteractiveApp {
 		this.chat.addChild(this.banner);
 	}
 
-	/** Replace the transcript. This redraws the whole screen, so it is used only for /new and /resume. */
+	/** Replace the transcript. This redraws the whole screen, so it is used only for /clear and /resume. */
 	private resetTranscript(): void {
 		this.chat.clear();
 		this.toolViews.clear();
@@ -1164,7 +1175,7 @@ class InteractiveApp {
 				web: this.agent.web,
 				serving: this.serving,
 				aiStatus: this.aiStatus,
-				cwd: this.options.cwd,
+				contextTokens: this.contextEstimate,
 				lastReply: this.lastReply,
 				lastTurnMs: this.lastTurnMs,
 			}),

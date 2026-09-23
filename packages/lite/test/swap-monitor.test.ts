@@ -7,6 +7,7 @@ import {
 	SwapGuard,
 	SwapMonitor,
 	type SwapUsage,
+	underPressure,
 } from "../src/llm/swap-monitor.ts";
 
 describe("parseDarwinSwap", () => {
@@ -192,5 +193,56 @@ describe("SwapGuard", () => {
 		guard.shouldRecycle(usage(5));
 		expect(guard.recycled(undefined)).toBe(false);
 		expect(guard.shouldRecycle(usage(5))).toBe(true);
+	});
+});
+
+describe("memory pressure", () => {
+	const gb = 1024 * 1024 * 1024;
+	const usage = (swap: number, freePercent?: number) => ({
+		totalBytes: 16 * gb,
+		usedBytes: swap * gb,
+		freeBytes: (16 - swap) * gb,
+		freePercent,
+	});
+
+	it("needs swap over the limit and little free memory, or swap alone without a reading", () => {
+		expect(underPressure(usage(6, 5), 4 * gb)).toBe(true);
+		expect(underPressure(usage(6, 40), 4 * gb)).toBe(false);
+		expect(underPressure(usage(2, 5), 4 * gb)).toBe(false);
+		expect(underPressure(usage(6), 4 * gb)).toBe(true);
+	});
+
+	it("stays armed when stopping the server freed memory, though swap still reads high", () => {
+		const guard = new SwapGuard(4 * gb);
+		expect(guard.shouldRecycle(usage(6, 4))).toBe(true);
+		// macOS keeps pages in swap until their owner touches them, so the figure barely moves.
+		expect(guard.recycled(usage(5.9, 70))).toBe(false);
+		expect(guard.shouldRecycle(usage(6, 4))).toBe(true);
+	});
+
+	it("pauses when memory stays short without the server, and re-arms once it is not", () => {
+		const guard = new SwapGuard(4 * gb);
+		expect(guard.shouldRecycle(usage(6, 4))).toBe(true);
+		expect(guard.recycled(usage(6, 5))).toBe(true);
+		expect(guard.shouldRecycle(usage(6, 4))).toBe(false);
+		expect(guard.shouldRecycle(usage(6, 30))).toBe(false);
+		expect(guard.shouldRecycle(usage(6, 4))).toBe(true);
+	});
+
+	it("does not trigger the serve monitor on swap alone when memory is free", async () => {
+		const onExceeded = vi.fn();
+		let current = usage(6, 50);
+		const monitor = new SwapMonitor({
+			thresholdBytes: 4 * gb,
+			readUsage: async () => current,
+			onThresholdExceeded: onExceeded,
+		});
+		monitor.start();
+		await monitor.check();
+		expect(onExceeded).not.toHaveBeenCalled();
+		current = usage(6, 3);
+		await monitor.check();
+		expect(onExceeded).toHaveBeenCalledTimes(1);
+		monitor.stop();
 	});
 });

@@ -12,7 +12,7 @@ export type CommandName =
 	| "serve"
 	| "disconnect"
 	| "compact"
-	| "new"
+	| "clear"
 	| "resume"
 	| "quit";
 
@@ -30,7 +30,7 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 		description: "Run context compaction on past tool calls and results",
 		argumentHint: "[threshold]",
 	},
-	{ name: "new", description: "Start a new session (clears the conversation)" },
+	{ name: "clear", description: "Clear the conversation and start a new session" },
 	{ name: "resume", description: "Resume a saved session from this directory", argumentHint: "[id]" },
 	{ name: "quit", description: "Exit" },
 ];
@@ -40,9 +40,9 @@ const ALIASES: Record<string, CommandName> = {
 	models: "model",
 	host: "serve",
 	stop: "disconnect",
-	clear: "new",
-	cls: "new",
-	reset: "new",
+	new: "clear",
+	cls: "clear",
+	reset: "clear",
 	compress: "compact",
 	prune: "compact",
 };

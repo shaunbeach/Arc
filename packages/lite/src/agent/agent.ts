@@ -170,7 +170,8 @@ export class Agent {
 		this.contextWindow.adoptDecisions(this.transcript, result.decisions);
 
 		const after = this.contextWindow.view(this.transcript);
-		const estimatedTokens = tokensOf(after.messages);
+		// The whole prompt, as the footer's measured figure counts it: instructions and tools included.
+		const estimatedTokens = estimateFixedPromptTokens(this.systemPrompt, this.activeTools) + tokensOf(after.messages);
 		return {
 			compactedCalls: Math.max(0, after.compactedCalls - before.compactedCalls),
 			tokensSaved: Math.max(0, tokensOf(before.messages) - estimatedTokens),
@@ -245,7 +246,7 @@ export class Agent {
 						}
 						if (selection.estimatedTokens > model.contextWindow - replyFloor) {
 							throw new Error(
-								`Context full: this request needs about ${selection.estimatedTokens} tokens even after trimming, leaving less than ${replyFloor} of the ${model.contextWindow}-token window for the reply. Start a new session with /new, or raise contextWindow and --ctx-size in models.yml.`,
+								`Context full: this request needs about ${selection.estimatedTokens} tokens even after trimming, leaving less than ${replyFloor} of the ${model.contextWindow}-token window for the reply. Start a new session with /clear, or raise contextWindow and --ctx-size in models.yml.`,
 							);
 						}
 						return selection.messages;

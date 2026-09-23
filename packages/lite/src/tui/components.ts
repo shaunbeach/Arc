@@ -433,7 +433,8 @@ export interface FooterState {
 	web?: boolean;
 	/** The model hosted with `/serve`, while it runs. */
 	serving?: { modelName: string; port: string };
-	cwd: string;
+	/** Estimated prompt size after `/compact`, shown until the next reply reports what the server measured. */
+	contextTokens?: number;
 	/** The latest reply with token usage, for context fill and speed. */
 	lastReply?: AssistantMessage;
 	/** Wall time of the last finished turn, in ms. Absent until one completes. */
@@ -453,8 +454,8 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * `model · mode · [status] · ctx used/window · tok/s · took · cwd`, `serving model · port N · [serving] · cwd` while
- * hosting, or `no model · cwd`.
+ * `model · mode · [status] · ctx used/window · tok/s · took`, `serving model · port N · [serving]` while hosting, or
+ * `no model`. The working directory is in the banner.
  */
 export function formatFooter(state: FooterState): string {
 	const parts: string[] = [];
@@ -489,7 +490,9 @@ export function formatFooter(state: FooterState): string {
 		parts.push(statusBracket);
 
 		const usage = state.lastReply?.usage;
-		if (usage && usage.promptTokens > 0) {
+		if (state.contextTokens !== undefined) {
+			parts.push(style.gray(`ctx ~${formatTokens(state.contextTokens)}/${formatTokens(state.model.contextWindow)}`));
+		} else if (usage && usage.promptTokens > 0) {
 			const used = formatTokens(usage.promptTokens + usage.completionTokens);
 			parts.push(style.gray(`ctx ${used}/${formatTokens(state.model.contextWindow)}`));
 		}
@@ -499,8 +502,5 @@ export function formatFooter(state: FooterState): string {
 	} else {
 		parts.push(style.gray("no model"));
 	}
-	const home = homedir();
-	const displayCwd = state.cwd.startsWith(home) ? `~${state.cwd.slice(home.length)}` : state.cwd;
-	parts.push(style.gray(displayCwd));
 	return ` ${parts.join(style.gray(" · "))}`;
 }

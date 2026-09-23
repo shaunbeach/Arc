@@ -8,6 +8,27 @@ export interface SwapUsage {
 	totalBytes: number;
 	usedBytes: number;
 	freeBytes: number;
+	/** System-wide free memory, in percent, when the platform reports it (macOS `memory_pressure`, Linux MemAvailable). */
+	freePercent?: number;
+}
+
+/** Below this share of free memory, the system is short of it. */
+export const LOW_FREE_PERCENT = 10;
+
+/**
+ * Whether memory is short enough to free the model's: swap over the limit and little memory free. Swap alone is a
+ * poor signal: macOS takes swapped pages back only when their owner touches them again, so the figure stays high long
+ * after the pressure is gone. Free memory recovers as soon as the server stops. Without a free-memory reading, swap
+ * decides alone.
+ */
+export function underPressure(usage: SwapUsage, thresholdBytes: number): boolean {
+	return (
+		usage.usedBytes >= thresholdBytes && (usage.freePercent === undefined || usage.freePercent < LOW_FREE_PERCENT)
+	);
+}
+
+function withFreePercent(usage: SwapUsage | undefined, freePercent: number | undefined): SwapUsage | undefined {
+	return usage && freePercent !== undefined && Number.isFinite(freePercent) ? { ...usage, freePercent } : usage;
 }
 
 export function parseDarwinSwap(output: string): SwapUsage | undefined {
@@ -59,8 +80,9 @@ export function parseLinuxMeminfo(content: string): SwapUsage | undefined {
 export async function readSwapUsage(): Promise<SwapUsage | undefined> {
 	if (process.platform === "darwin") {
 		try {
-			const { stdout } = await execFileAsync("sysctl", ["-n", "vm.swapusage"]);
-			return parseDarwinSwap(stdout);
+			const { stdout } = await execFileAsync("sysctl", ["-n", "vm.swapusage", "kern.memorystatus_level"]);
+			const [swapLine, level] = stdout.trim().split("\n");
+			return withFreePercent(parseDarwinSwap(swapLine), level === undefined ? undefined : Number(level));
 		} catch {
 			return undefined;
 		}
@@ -68,12 +90,20 @@ export async function readSwapUsage(): Promise<SwapUsage | undefined> {
 	if (process.platform === "linux") {
 		try {
 			const content = readFileSync("/proc/meminfo", "utf8");
-			return parseLinuxMeminfo(content);
+			const total = Number(/MemTotal:\s+(\d+)/.exec(content)?.[1]);
+			const available = Number(/MemAvailable:\s+(\d+)/.exec(content)?.[1]);
+			return withFreePercent(parseLinuxMeminfo(content), total > 0 ? (available / total) * 100 : undefined);
 		} catch {
 			return undefined;
 		}
 	}
 	return undefined;
+}
+
+/** `swap 5.1 GB, 7% free` for notices, or just the swap when free memory is unknown. */
+export function describeMemory(usage: SwapUsage): string {
+	const free = usage.freePercent === undefined ? "" : `, ${Math.round(usage.freePercent)}% free`;
+	return `swap ${formatGigabytes(usage.usedBytes)}${free}`;
 }
 
 export function formatGigabytes(bytes: number): string {
@@ -96,9 +126,9 @@ export function parseSwapLimit(text: string): number | undefined {
 }
 
 /**
- * Decides when to free the model's memory between agent turns. Swap is system-wide: when stopping the server did not
- * bring it under the limit, other applications hold it, so the guard pauses until swap drops, instead of reloading
- * the model after every turn.
+ * Decides when to free the model's memory between agent turns. Memory is system-wide: when stopping the server does
+ * not bring free memory back, other applications hold it, so the guard pauses until memory is no longer short, instead
+ * of reloading the model after every turn.
  */
 export class SwapGuard {
 	readonly thresholdBytes: number;
@@ -108,18 +138,21 @@ export class SwapGuard {
 		this.thresholdBytes = thresholdBytes;
 	}
 
-	/** Whether to stop the server now. Swap under the limit re-arms a paused guard. */
+	/** Whether to stop the server now. Memory no longer short re-arms a paused guard. */
 	shouldRecycle(usage: SwapUsage): boolean {
-		if (usage.usedBytes < this.thresholdBytes) {
+		if (!underPressure(usage, this.thresholdBytes)) {
 			this.armed = true;
 			return false;
 		}
 		return this.armed;
 	}
 
-	/** Records swap after a stop. Returns true when the guard pauses, because swap stayed over the limit. */
+	/**
+	 * Records memory after a stop. Returns true when the guard pauses: memory is still short with the server stopped,
+	 * so other applications hold it. Swap still over the limit alone does not pause it; see `underPressure`.
+	 */
 	recycled(after: SwapUsage | undefined): boolean {
-		this.armed = after === undefined || after.usedBytes < this.thresholdBytes;
+		this.armed = after === undefined || !underPressure(after, this.thresholdBytes);
 		return !this.armed;
 	}
 }
@@ -133,7 +166,7 @@ export interface SwapMonitorOptions {
 	readUsage?: () => Promise<SwapUsage | undefined>;
 	/** Called on every sample. */
 	onSample?: (usage: SwapUsage) => void;
-	/** Called when swap usage exceeds thresholdBytes. */
+	/** Called when memory is short: swap over thresholdBytes and little memory free (see `underPressure`). */
 	onThresholdExceeded?: (usage: SwapUsage) => void | Promise<void>;
 	/** Called when swap drops back below threshold after being exceeded. */
 	onRecovered?: (usage: SwapUsage) => void;
@@ -204,13 +237,13 @@ export class SwapMonitor {
 			if (!usage) return undefined;
 			this.onSample?.(usage);
 			if (this.paused) {
-				if (usage.usedBytes < this.thresholdBytes) {
+				if (!underPressure(usage, this.thresholdBytes)) {
 					this.paused = false;
 					this.onRecovered?.(usage);
 				}
 				return usage;
 			}
-			if (usage.usedBytes >= this.thresholdBytes) {
+			if (underPressure(usage, this.thresholdBytes)) {
 				this.paused = true;
 				await this.onThresholdExceeded?.(usage);
 			}
