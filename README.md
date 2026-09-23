@@ -5,7 +5,7 @@ A terminal coding assistant for local models served by llama.cpp. It starts `lla
 pi-lite is a modified version of [pi](https://github.com/earendil-works/pi), the terminal coding agent by Mario Zechner and contributors. It keeps pi's agent loop, tools, and terminal UI library, and drops the cloud providers, logins, extensions, and telemetry. See [Origin and license](#origin-and-license).
 
 - **Local models.** Models, ports, and llama-server arguments come from `models.yml`; the model runs on llama-server. The only other network requests come from the web tools, which `/web off` turns off.
-- **Small prompt.** The system prompt and tool definitions take under 1,000 tokens and stay byte-identical until you switch mode or `/web`, so llama.cpp reuses its KV cache.
+- **Small prompt.** The system prompt and tool definitions take under 1,000 tokens (about 100 more with `/rag on`) and stay byte-identical until you switch mode, `/web`, or `/rag`, so llama.cpp reuses its KV cache.
 - **Small process.** One Node process (about 60 MB resident) running a single 590 KB file. llama-server runs only while pi-lite does.
 - **Three ways to work.** Agent mode changes code, plan mode researches and plans without changing files, chat mode just talks. Thinking and instruct sampling switch independently.
 - **Built for long runs in small windows.** Trimming keeps a record of what it removes, so a model with a 16k window does not lose track of the files it wrote. See [Context window](#context-window).
@@ -119,6 +119,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/mode [thinking\|instruct]` | Switch sampling mode. Without an argument, toggles. |
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
+| `/rag [on\|off]` | Let the model search your offline knowledge base. Without an argument, toggles. See [Knowledge base](#knowledge-base). |
 | `/compact [threshold]` | Ask the model which old tool results it still needs, and cut the rest. See [Context window](#context-window). |
 | `/serve [name]` | Host a model for other machines. See [Hosting](#hosting). |
 | `/disconnect` | Stop llama-server and unload the model without exiting. |
@@ -134,7 +135,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `ctrl+d` | Exit when the editor is empty |
 | `shift+tab` | Switch sampling mode |
 
-Messages typed while the model works are sent with its next turn. The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, and what the model is doing. Sessions are stored in `~/.pi-lite/sessions/` (set `PI_LITE_DIR` to move them), and llama-server output goes to `~/.pi-lite/logs/llama-server.log`.
+Messages typed while the model works are sent with its next turn. The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.pi-lite/sessions/` (set `PI_LITE_DIR` to move them), and llama-server output goes to `~/.pi-lite/logs/llama-server.log`.
 
 ## Modes
 
@@ -144,7 +145,7 @@ Messages typed while the model works are sent with its next turn. The footer sho
 | plan | read, web_search, web_fetch | research the project and write a plan, without changing files |
 | chat | web_search, web_fetch | talk, look things up |
 
-Each mode has its own system prompt. The mode and the `/web` setting are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on.
+Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`. The mode and the `/web` and `/rag` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on and the knowledge base off.
 
 ## Web tools
 
@@ -156,6 +157,20 @@ Each mode has its own system prompt. The mode and the `/web` setting are saved w
 - In plan and chat modes, where the web tools are all the model has, `web_fetch` refuses loopback and private addresses, including through redirects, so a page cannot steer the model into your local network. Agent mode reaches them, as bash could anyway.
 
 `PI_WEB_TIMEOUT_MS` changes the request timeout (30 s for pages, 20 s for searches). `/web off` removes both tools and every mention of them from the prompt.
+
+## Knowledge base
+
+`/rag on` gives the model `kb_search`, which searches offline [ZIM archives](https://wiki.openzim.org/): Wikipedia, DevDocs, and the rest of [library.kiwix.org](https://library.kiwix.org). It needs `kiwix-serve` from [kiwix-tools](https://download.kiwix.org/release/kiwix-tools/) and a folder of `.zim` files, named in `models.yml`:
+
+```yaml
+rag:
+  zimFolder: ~/Documents/RAG_Databases
+  # kiwixServe: /usr/local/bin/kiwix-serve   # when it is not on PATH
+```
+
+- **Searching** returns five results with short snippets, about 1,200 tokens. It combines kiwix's full-text ranking with title matches, so "deepest point of the atlantic ocean" puts *Atlantic Ocean* first.
+- **Reading** an article returns only the parts that match the question: the opening paragraphs, then the best-matching sections, up to a fifth of the room in the context window (about 7,000 characters for a 20k window), without links, citation marks, info boxes, or reference lists. A whole Wikipedia article can hold 40,000 tokens; the result names the sections it left out, so the model can ask for one.
+- **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when pi-lite exits. Its output goes to `~/.pi-lite/logs/kiwix-serve.log`.
 
 ## Hosting
 
@@ -197,7 +212,8 @@ packages/lite          the app
   src/config/          models.yml loader, sampling presets
   src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor, /props discovery
   src/agent/           agent loop
-  src/tools/           read, edit, write, bash, web_search, web_fetch
+  src/tools/           read, edit, write, bash, web_search, web_fetch, kb_search
+  src/rag/             kiwix-serve, and cutting articles down to the parts that match
   src/context.ts       context window trimming
   src/work-log.ts      the work log sent with trimmed tasks
   src/jev/             /compact: asks the model which tool results are still needed
