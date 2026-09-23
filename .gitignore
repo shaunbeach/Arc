@@ -10,9 +10,9 @@ coverage/
 models.yml
 models-*.yml
 
-# Copied from the repository root by the pi-lite prepack script.
-packages/lite/README.md
-packages/lite/LICENSE
+# Copied from the repository root by the Arc prepack script.
+packages/arc/README.md
+packages/arc/LICENSE
 *.tgz
 
 # Editor files

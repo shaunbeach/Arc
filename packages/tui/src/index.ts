@@ -1,4 +1,4 @@
-// The parts of pi-tui that pi-lite uses: the main-screen renderer, the editor, markdown, select lists, and text helpers.
+// The parts of pi-tui that Arc uses: the main-screen renderer, the editor, markdown, select lists, and text helpers.
 
 export {
 	type AutocompleteItem,

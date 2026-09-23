@@ -2,7 +2,7 @@
 	"name": "@earendil-works/pi-tui",
 	"version": "0.85.1",
 	"private": true,
-	"description": "Main-screen terminal UI with differential rendering, trimmed to what pi-lite uses",
+	"description": "Main-screen terminal UI with differential rendering, trimmed to what Arc uses",
 	"type": "module",
 	"exports": {
 		".": "./src/index.ts"

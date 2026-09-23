@@ -1,12 +1,12 @@
-# pi-lite
+# Arc
 
 A terminal coding assistant for local models served by llama.cpp. It starts `llama-server` for the model you pick, gives the model tools to read, edit, and write files, run shell commands, and search and read the web, and keeps its prompt, memory use, and screen updates small.
 
-pi-lite is a modified version of [pi](https://github.com/earendil-works/pi), the terminal coding agent by Mario Zechner and contributors. It keeps pi's agent loop, tools, and terminal UI library, and drops the cloud providers, logins, extensions, and telemetry. See [Origin and license](#origin-and-license).
+Arc is a modified version of [pi](https://github.com/earendil-works/pi), the terminal coding agent by Mario Zechner and contributors. It keeps pi's agent loop, tools, and terminal UI library, and drops the cloud providers, logins, extensions, and telemetry. See [Origin and license](#origin-and-license).
 
 - **Local models.** Models, ports, and llama-server arguments come from `models.yml`; the model runs on llama-server. The only other network requests come from the web tools, which `/web off` turns off.
 - **Small prompt.** The system prompt and tool definitions take under 1,000 tokens (about 100 more with `/rag on`) and stay byte-identical until you switch mode, `/web`, or `/rag`, so llama.cpp reuses its KV cache.
-- **Small process.** One Node process (about 60 MB resident) running a single 590 KB file. llama-server runs only while pi-lite does.
+- **Small process.** One Node process (about 60 MB resident) running a single 590 KB file. llama-server runs only while Arc does.
 - **Three ways to work.** Agent mode changes code, plan mode researches and plans without changing files, chat mode just talks. Thinking and instruct sampling switch independently.
 - **Built for long runs in small windows.** Trimming keeps a record of what it removes, so a model with a 16k window does not lose track of the files it wrote. See [Context window](#context-window).
 - **Terminal friendly.** Renders on the main screen, so tmux and terminal scrollback keep working. Sessions are saved as append-only JSONL.
@@ -20,26 +20,24 @@ pi-lite is a modified version of [pi](https://github.com/earendil-works/pi), the
 ## Install
 
 ```bash
-npm install -g pi-lite
-pi-lite --init    # writes ~/.pi-lite/models.yml; set your GGUF path in it
-pi-lite
-```
-
-The package is one bundled file with no dependencies. `npx pi-lite` works for a quick try, but it keeps an extra npm process running for the whole session, so install it for daily use.
-
-From a clone:
-
-```bash
-git clone https://github.com/shaunbeach/pi-lite.git
-cd pi-lite
+git clone https://github.com/shaunbeach/Arc.git arc
+cd arc
 npm ci --ignore-scripts
 npm run build
-ln -s "$PWD/packages/lite/dist/pi-lite.js" ~/.local/bin/pi-lite   # a symlink, so rebuilds apply at once
+ln -s "$PWD/packages/arc/dist/arc.js" ~/.local/bin/arc   # a symlink, so rebuilds apply at once
+arc --init    # writes ~/.arc/models.yml; set your GGUF path in it
+arc
 ```
+
+The build is one bundled file with no dependencies. Arc is not on npm: the npm package named `arc` is an unrelated project, so do not `npm install -g arc`.
+
+### Coming from pi-lite
+
+Arc was called pi-lite. The first time `arc` runs, it moves `~/.pi-lite` to `~/.arc`, so sessions, logs, the last-used model, and models.yml carry over; quit any running pi-lite first. `PI_LITE_DIR`, `PI_MODELS`, and `PI_WEB_TIMEOUT_MS` still work alongside the new `ARC_DIR`, `ARC_MODELS`, and `ARC_WEB_TIMEOUT_MS`. The `pi-lite` command is gone: replace its symlink with the `arc` one above. The repository moved to `shaunbeach/Arc`; GitHub redirects the old address, and `git remote set-url origin https://github.com/shaunbeach/Arc.git` points a clone at the new one.
 
 ## models.yml
 
-pi-lite reads `--models <path>`, else `$PI_MODELS`, else `./models.yml`, else `~/.pi-lite/models.yml`. `pi-lite --init` writes a commented starter file to the last location. Only the `providers:` key is read, so the file can hold settings for other tools; to share one file, symlink it to `~/.pi-lite/models.yml`.
+Arc reads `--models <path>`, else `$ARC_MODELS`, else `./models.yml`, else `~/.arc/models.yml`. `arc --init` writes a commented starter file to the last location. Only the `providers:` key is read, so the file can hold settings for other tools; to share one file, symlink it to `~/.arc/models.yml`.
 
 ```yaml
 providers:
@@ -62,13 +60,13 @@ providers:
         #       thinking_budget_tokens: 2048
 ```
 
-pi-lite runs `llama-server -m <modelDir>/<id> <launchArgs>`, adding `--port` from `baseUrl` when it is missing, and waits for `/health`. It stops the server when you quit, switch models, or `/disconnect`. A running server that already serves the same GGUF is reused and is never stopped by pi-lite.
+Arc runs `llama-server -m <modelDir>/<id> <launchArgs>`, adding `--port` from `baseUrl` when it is missing, and waits for `/health`. It stops the server when you quit, switch models, or `/disconnect`. A running server that already serves the same GGUF is reused and is never stopped by Arc.
 
 ## Connecting to a model on another machine
 
-A models.yml entry describes a GGUF that pi-lite can start. That does not work for a model running somewhere else: the path belongs to the other machine, and every change there -- a different quant, a wider window, a projector loaded -- has to be copied back by hand, or pi-lite refuses to attach.
+A models.yml entry describes a GGUF that Arc can start. That does not work for a model running somewhere else: the path belongs to the other machine, and every change there -- a different quant, a wider window, a projector loaded -- has to be copied back by hand, or Arc refuses to attach.
 
-`discover: true` describes no model at all. On connect pi-lite asks the server's `/props` what it is running and takes the answer:
+`discover: true` describes no model at all. On connect Arc asks the server's `/props` what it is running and takes the answer:
 
 ```yaml
 providers:
@@ -83,9 +81,9 @@ providers:
 Connected to Ornith-1.5-9B-Q4_K_M at http://192.168.1.27:8080 · ctx 65.5k · reply 8.2k · thinking · vision · b10809-5266f24da
 ```
 
-The GGUF name, the context window, whether it loaded a projector, and whether its template supports thinking all come from the server, so the banner and footer name the real model and `read` attaches images only when it can. Start something else there and `/model Remote` again: it asks afresh. pi-lite never starts a server for such an entry: it says `Nothing is serving at ...` when the address is quiet, and `Lost the connection to ...` when a server that had answered stops or the route to it goes down.
+The GGUF name, the context window, whether it loaded a projector, and whether its template supports thinking all come from the server, so the banner and footer name the real model and `read` attaches images only when it can. Start something else there and `/model Remote` again: it asks afresh. Arc never starts a server for such an entry: it says `Nothing is serving at ...` when the address is quiet, and `Lost the connection to ...` when a server that had answered stops or the route to it goes down.
 
-`maxTokens` is the one thing `/props` does not advertise, being pi-lite's reply reserve rather than a server setting; left out it defaults to a quarter of the reported window, capped at 8192. Per-request variants are not discoverable either, so reasoning-effort levels still need one ordinary entry each.
+`maxTokens` is the one thing `/props` does not advertise, being Arc's reply reserve rather than a server setting; left out it defaults to a quarter of the reported window, capped at 8192. Per-request variants are not discoverable either, so reasoning-effort levels still need one ordinary entry each.
 
 ## Sampling modes
 
@@ -94,21 +92,21 @@ The GGUF name, the context window, whether it loaded a projector, and whether it
 | thinking | 1.0 | 0.95 | 20 | 0.0 | 0.0 | On. Reasoning from the current turn is sent back; older reasoning is dropped. |
 | instruct | 0.7 | 0.80 | 20 | 0.0 | 1.5 | Off |
 
-The presets live in `packages/lite/src/config/sampling.ts`. A model's `sampling:` block can override any field, including `thinkingHistory` (`none`, `turn`, or `all`), `reasoningEffort`, and `extra`, which merges arbitrary request fields.
+The presets live in `packages/arc/src/config/sampling.ts`. A model's `sampling:` block can override any field, including `thinkingHistory` (`none`, `turn`, or `all`), `reasoningEffort`, and `extra`, which merges arbitrary request fields.
 
 ## Usage
 
 ```bash
-pi-lite                                        # interactive session; pick a model with /model
-pi-lite -m 27b                                 # load a model at start: any unique part of its name
-pi-lite -m Qwen3.8 --mode instruct
-pi-lite -c                                     # continue the latest session in this directory
-pi-lite -r                                     # pick a saved session to resume
-pi-lite --serve 27b                            # host a model for other machines (see Hosting)
-pi-lite -m 27b --max-swap 6GB                  # guard memory during a long run (see Memory guard)
-pi-lite -p "run the tests and fix failures"    # one prompt, reply on stdout
-pi-lite --list-models                          # * marks the model -p uses without -m
-pi-lite --show-prompt                          # system prompt and tool definitions, with a token estimate
+arc                                        # interactive session; pick a model with /model
+arc -m 27b                                 # load a model at start: any unique part of its name
+arc -m Qwen3.8 --mode instruct
+arc -c                                     # continue the latest session in this directory
+arc -r                                     # pick a saved session to resume
+arc --serve 27b                            # host a model for other machines (see Hosting)
+arc -m 27b --max-swap 6GB                  # guard memory during a long run (see Memory guard)
+arc -p "run the tests and fix failures"    # one prompt, reply on stdout
+arc --list-models                          # * marks the model -p uses without -m
+arc --show-prompt                          # system prompt and tool definitions, with a token estimate
 ```
 
 The startup banner lists this directory's five most recent sessions (three on a narrow terminal), numbered for `/resume`. An interactive session starts without a model; `/model` opens a picker, and a message sent before then opens it too. `-c`, `-r`, and `--session` load the model the session used.
@@ -144,7 +142,7 @@ You can keep typing while the model works. Each message you send is queued, and 
 
 Commands such as `/web` or `/rag` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
 
-The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.pi-lite/sessions/` (set `PI_LITE_DIR` to move them), and llama-server output goes to `~/.pi-lite/logs/llama-server.log`.
+The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.arc/sessions/` (set `ARC_DIR` to move them), and llama-server output goes to `~/.arc/logs/llama-server.log`.
 
 ## Modes
 
@@ -162,10 +160,10 @@ Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_se
 
 - HTML becomes Markdown with absolute links, so the model can follow them. Text, JSON, and XML come back as they are.
 - Long pages come in parts; the result says which `start` continues it.
-- Other files, such as PDFs, images, and archives, are saved to `$TMPDIR/pi-lite-fetch/`, and the model is told where, so it can extract them with bash or `read` an image.
+- Other files, such as PDFs, images, and archives, are saved to `$TMPDIR/arc-fetch/`, and the model is told where, so it can extract them with bash or `read` an image.
 - In plan and chat modes, where the web tools are all the model has, `web_fetch` refuses loopback and private addresses, including through redirects, so a page cannot steer the model into your local network. Agent mode reaches them, as bash could anyway.
 
-`PI_WEB_TIMEOUT_MS` changes the request timeout (30 s for pages, 20 s for searches). `/web off` removes both tools and every mention of them from the prompt.
+`ARC_WEB_TIMEOUT_MS` changes the request timeout (30 s for pages, 20 s for searches). `/web off` removes both tools and every mention of them from the prompt.
 
 ## Knowledge base
 
@@ -179,11 +177,11 @@ rag:
 
 - **Searching** returns five results with short snippets, about 1,200 tokens. It combines kiwix's full-text ranking with title matches, so "deepest point of the atlantic ocean" puts *Atlantic Ocean* first.
 - **Reading** an article returns only the parts that match the question: the opening paragraphs, then the best-matching sections, up to a fifth of the room in the context window (about 7,000 characters for a 20k window), without links, citation marks, info boxes, or reference lists. A whole Wikipedia article can hold 40,000 tokens; the result names the sections it left out, so the model can ask for one.
-- **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when pi-lite exits. Its output goes to `~/.pi-lite/logs/kiwix-serve.log`.
+- **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when Arc exits. Its output goes to `~/.arc/logs/kiwix-serve.log`.
 
 ## Hosting
 
-`/serve [name]` or `pi-lite --serve [name]` runs llama-server for the model on `0.0.0.0`, so other machines can use it at the address shown, such as `http://192.168.1.20:8080/v1`. A panel above the editor shows the server's log; esc or ctrl+c stops it. pi-lite refuses to host on a port another llama-server already holds. Stop hosting before sending prompts.
+`/serve [name]` or `arc --serve [name]` runs llama-server for the model on `0.0.0.0`, so other machines can use it at the address shown, such as `http://192.168.1.20:8080/v1`. A panel above the editor shows the server's log; esc or ctrl+c stops it. Arc refuses to host on a port another llama-server already holds. Stop hosting before sending prompts.
 
 ## Memory guard
 
@@ -196,7 +194,7 @@ Swap alone would mislead it: the system takes pages back from swap only when the
 
 ## Context window
 
-Nothing is trimmed while the prompt fits in `contextWindow - maxTokens`. Past that, pi-lite trims to 60% of the budget in one go, oldest first:
+Nothing is trimmed while the prompt fits in `contextWindow - maxTokens`. Past that, Arc trims to 60% of the budget in one go, oldest first:
 
 1. reasoning of all but the two most recent steps (a step is one model response and its tool results);
 2. long tool calls and results of those steps. A call with long arguments, such as a file it wrote, becomes a note in the model's own words, such as `(Earlier tool call left out to save context: wrote src/app.ts (120 lines)…)`; a long result keeps its first lines and says how many were left out;
@@ -216,7 +214,7 @@ Each tool result is capped at about a fifth of `contextWindow - maxTokens`, abou
 ## Layout
 
 ```
-packages/lite          the app
+packages/arc          the app
   src/cli.ts           flags and print mode
   src/config/          models.yml loader, sampling presets
   src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor, /props discovery
@@ -242,11 +240,11 @@ npm run dev -- -p "hello"      # run from source
 
 ## Origin and license
 
-pi-lite began as a fork of [earendil-works/pi](https://github.com/earendil-works/pi) at commit `08dc60bc5` (September 2026) and was cut down to a llama.cpp-only harness. This repository starts with a fresh history; pi's repository holds the history of the code pi-lite inherits.
+Arc began as a fork of [earendil-works/pi](https://github.com/earendil-works/pi) at commit `08dc60bc5` (September 2026) and was cut down to a llama.cpp-only harness. This repository starts with a fresh history; pi's repository holds the history of the code Arc inherits.
 
-- **Adapted from pi:** the agent loop and its event stream, tool-argument validation, streaming JSON parsing, the read, edit, write, and bash tools (including edit's fuzzy matching and output truncation), and pi-tui, pi's terminal UI library, trimmed to what pi-lite uses (`packages/tui`).
-- **Written for pi-lite:** the llama.cpp client (based on pi's OpenAI-compatible client, rebuilt on plain `fetch`), llama-server management and hosting, the models.yml loader, sampling presets, context trimming and the work log, modes, the web tools, the memory guard, sessions, the system prompt, and the interactive app.
+- **Adapted from pi:** the agent loop and its event stream, tool-argument validation, streaming JSON parsing, the read, edit, write, and bash tools (including edit's fuzzy matching and output truncation), and pi-tui, pi's terminal UI library, trimmed to what Arc uses (`packages/tui`).
+- **Written for Arc:** the llama.cpp client (based on pi's OpenAI-compatible client, rebuilt on plain `fetch`), llama-server management and hosting, the models.yml loader, sampling presets, context trimming and the work log, modes, the web tools, the memory guard, sessions, the system prompt, and the interactive app.
 - **Adapted from fast-jev-compaction:** `/compact`'s questions and decisions follow [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (MIT), answered by the local model instead of the hosted Jev service.
 - **Removed:** cloud providers and OAuth, the model catalog, extensions and package management, remote sessions, summary-based compaction, telemetry, and pi's other packages.
 
-pi-lite is not affiliated with or endorsed by the pi project. Both are released under the MIT License, and [LICENSE](LICENSE) keeps pi's copyright notice alongside pi-lite's.
+Arc is not affiliated with or endorsed by the pi project. Both are released under the MIT License, and [LICENSE](LICENSE) keeps pi's copyright notice alongside Arc's.
