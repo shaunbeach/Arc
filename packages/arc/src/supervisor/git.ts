@@ -1,10 +1,34 @@
 import { execFile } from "node:child_process";
+import { basename } from "node:path";
 
 /** Git's empty tree: the phase-start ref of a repository with no commits yet. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const PASSED_COMMIT = /^arc: phase (\d+) passed\b/;
 /** Characters per token when turning a token budget into characters, as `/compact` does. */
 const CHARS_PER_TOKEN = 3;
+/**
+ * Generated dependency locks. Their diffs run to thousands of lines a reviewer cannot judge, so the critic learns
+ * only that they changed, and its window goes to the code.
+ */
+const LOCK_FILES = new Set([
+	"package-lock.json",
+	"npm-shrinkwrap.json",
+	"yarn.lock",
+	"pnpm-lock.yaml",
+	"bun.lock",
+	"bun.lockb",
+	"Cargo.lock",
+	"poetry.lock",
+	"uv.lock",
+	"Pipfile.lock",
+	"Gemfile.lock",
+	"composer.lock",
+	"go.sum",
+]);
+
+export function isLockFile(path: string): boolean {
+	return LOCK_FILES.has(basename(path));
+}
 
 export interface GitResult {
 	code: number;
@@ -103,6 +127,10 @@ export async function diffSince(cwd: string, ref: string, maxChars: number, sign
 	const files = await changedFiles(cwd, ref, signal);
 	const diffs: string[] = [];
 	for (const file of files) {
+		if (isLockFile(file.path)) {
+			diffs.push(`${file.path}: dependency lock file changed; contents left out.`);
+			continue;
+		}
 		const args = file.untracked
 			? ["diff", "--no-color", "--no-index", "--", "/dev/null", file.path]
 			: ["diff", "--no-color", "--no-renames", ref, "--", file.path];

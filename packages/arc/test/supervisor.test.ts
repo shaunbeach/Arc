@@ -155,6 +155,22 @@ describe("git", () => {
 		}
 	});
 
+	it("names lock files without their contents", async () => {
+		const dir = repo();
+		try {
+			const start = await phaseStartRef(dir);
+			writeFileSync(join(dir, "package-lock.json"), `${'{"lockfileVersion": 3}\n'.repeat(500)}`);
+			writeFileSync(join(dir, "index.js"), "module.exports = 1;\n");
+			const diff = await diffSince(dir, start, 100_000);
+			expect(diff.text).toContain("Changed files (2):\nA index.js\nA package-lock.json");
+			expect(diff.text).toContain("package-lock.json: dependency lock file changed; contents left out.");
+			expect(diff.text).not.toContain("lockfileVersion");
+			expect(diff.text).toContain("+module.exports = 1;");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("gives the critic 60% of its window for diffs", () => {
 		expect(diffBudgetChars(65_536)).toBe(Math.floor(65_536 * 0.6 * 3));
 	});
