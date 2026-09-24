@@ -17,6 +17,7 @@ import { userText } from "./llm/text.ts";
 import type { Message } from "./llm/types.ts";
 import { isPonytailLevel, type PonytailLevel } from "./ponytail.ts";
 import { type InteractionMode, isInteractionMode } from "./prompt.ts";
+import type { SupervisorState } from "./supervisor/supervisor.ts";
 
 const SESSION_VERSION = 1;
 /** Bytes read from the start of each session file to build the picker preview. */
@@ -61,7 +62,9 @@ export type SessionEntry =
 	| ({ type: "settings"; timestamp: number } & SessionSettings)
 	| { type: "message"; message: Message }
 	/** From `/name`; the latest one names the session. */
-	| { type: "name"; name: string; timestamp: number };
+	| { type: "name"; name: string; timestamp: number }
+	/** The `/supervise` loop after each step; the latest one is where a resume starts. */
+	| { type: "supervisor"; state: SupervisorState; timestamp: number };
 
 export interface LoadedSession {
 	path: string;
@@ -71,6 +74,8 @@ export interface LoadedSession {
 	settings?: SessionSettings;
 	/** The name given with `/name`, if any. */
 	name?: string;
+	/** The last `/supervise` state, if the session ran one. */
+	supervisor?: SupervisorState;
 }
 
 export interface SessionSummary {
@@ -131,6 +136,8 @@ export class SessionFile {
 	private created: boolean;
 	/** A `/name` given before the first message, written when the file is created. */
 	private pendingName: string | undefined;
+	/** Supervisor state saved before the first message, written when the file is created. */
+	private pendingSupervisor: SupervisorState | undefined;
 
 	private constructor(id: string, path: string, cwd: string, settings: SessionSettings, created: boolean) {
 		this.id = id;
@@ -171,6 +178,9 @@ export class SessionFile {
 			if (this.pendingName !== undefined)
 				this.write({ type: "name", name: this.pendingName, timestamp: Date.now() });
 			this.pendingName = undefined;
+			if (this.pendingSupervisor !== undefined)
+				this.write({ type: "supervisor", state: this.pendingSupervisor, timestamp: Date.now() });
+			this.pendingSupervisor = undefined;
 		}
 		this.write({ type: "message", message });
 	}
@@ -179,6 +189,12 @@ export class SessionFile {
 	setName(name: string): void {
 		if (this.created) this.write({ type: "name", name, timestamp: Date.now() });
 		else this.pendingName = name;
+	}
+
+	/** Records the supervisor's state, so `/supervise resume` works after a restart too. */
+	setSupervisor(state: SupervisorState): void {
+		if (this.created) this.write({ type: "supervisor", state, timestamp: Date.now() });
+		else this.pendingSupervisor = state;
 	}
 
 	private write(entry: SessionEntry): void {
@@ -198,6 +214,7 @@ export function loadSession(path: string): LoadedSession {
 	let header: SessionHeader | undefined;
 	let settings: SessionSettings | undefined;
 	let name: string | undefined;
+	let supervisor: SupervisorState | undefined;
 	const messages: Message[] = [];
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
@@ -227,10 +244,12 @@ export function loadSession(path: string): LoadedSession {
 				settings.ponytail = ponytail;
 		} else if (entry.type === "name" && typeof entry.name === "string") {
 			name = entry.name;
+		} else if (entry.type === "supervisor" && typeof entry.state?.plan === "string") {
+			supervisor = entry.state;
 		}
 	}
 	if (!header) throw new Error(`${path} is empty.`);
-	return { path, header, messages, settings, ...(name ? { name } : {}) };
+	return { path, header, messages, settings, ...(name ? { name } : {}), ...(supervisor ? { supervisor } : {}) };
 }
 
 /**

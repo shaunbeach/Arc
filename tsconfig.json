@@ -15,5 +15,5 @@
 		"useDefineForClassFields": false,
 		"types": ["node"]
 	},
-	"include": ["packages/*/src/**/*", "packages/*/test/**/*"]
+	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/*/scripts/**/*.ts"]
 }

@@ -125,6 +125,9 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
 | `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
+| `/supervise [plan.md\|resume\|stop]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is. See [Supervisor](#supervisor). |
+| `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
+| `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
 | `/quit` | Exit. |
 
 | Key | Effect |
@@ -143,7 +146,7 @@ You can keep typing while the model works. Each message you send is queued, and 
 
 Commands such as `/web`, `/rag`, or `/ponytail` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
 
-The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, the ponytail level (`[P:Lite]`, `[P:Full]`, `[P:Ultra]`), and what the model is doing. Sessions are stored in `~/.arc/sessions/` (set `ARC_DIR` to move them), and llama-server output goes to `~/.arc/logs/llama-server.log`.
+The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, the ponytail level (`[P:Lite]`, `[P:Full]`, `[P:Ultra]`), the supervised phase (`[phase 2]`), and what the model is doing. Sessions are stored in `~/.arc/sessions/` (set `ARC_DIR` to move them), and llama-server output goes to `~/.arc/logs/llama-server.log`.
 
 ## Modes
 
@@ -191,6 +194,42 @@ rag:
 | `ultra` | Deletes before adding, ships the one-liner, and challenges the rest of the request. |
 
 It costs about 200 tokens per request while it is on, nothing while it is off. The level applies from the next message and is saved with the session.
+
+## Supervisor
+
+`/supervise implementation.md` works through a phased plan without you: the loaded model (the actor) builds each phase, the phase's checks run, and a second model (the critic) judges the result. It needs a critic in `models.yml`:
+
+```yaml
+supervisor:
+  critic: Ornith-1.5-9B-65k-Vision   # any local model entry
+  maxRetries: 3                      # failed attempts at one phase before halting
+  attemptMinutes: 90                 # longest one actor turn may run
+```
+
+Each phase is a `## Phase N: title` section of the plan. Its checks go in a ```` ```verify ```` block, one shell command per line:
+
+````md
+## Phase 2: Settings window
+Add a settings window with a save button.
+
+```verify
+npm run build
+npm test
+```
+````
+
+For each phase:
+
+1. The actor gets the phase text and the list of checks, and works until it ends its turn.
+2. The checks run in order. If one fails, the phase fails with its output, and the critic is skipped.
+3. Otherwise Arc stops the actor's llama-server and starts the critic's with a 64k window, which fits a 16 GB Mac. The critic reads the phase, the `git diff` since the phase began (cut to 60% of its window), the check output, and any images the checks saved: as images when the critic has a vision projector (`mmproj:` in `models.yml`, or `--mmproj` in `launchArgs`), otherwise as paths. A grammar forces its answer to pass, or fail with up to five reasons.
+4. A pass is committed as `arc: phase N passed: title`, and the next phase starts in a fresh context: the actor gets the whole window, plus a list of the files earlier phases built. A fail goes back to the actor with the reasons, and the actor keeps its history of the phase.
+5. A loop guard watches the actor. If it makes the same tool call 3 times among its last 5, or one turn runs past `attemptMinutes`, Arc ends the turn and checks the phase right away. On a fail, the actor is told why it was stopped.
+6. After `maxRetries` fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries back.
+
+The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit. The loop's place is saved with the session: after esc, `/supervise stop`, or a restart, `/supervise resume` continues, and a new `/supervise` on the same plan starts at the first phase without a passed commit. Messages you type while the loop runs go to the actor's next turn. The footer shows `[phase 2]`, with failed attempts and `halted` or `stopped` when they apply.
+
+Every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
 
 ## Hosting
 
@@ -240,6 +279,7 @@ packages/arc          the app
   src/prompt.ts        system prompt
   src/ponytail.ts      /ponytail rules
   src/session.ts       JSONL sessions
+  src/supervisor/      /supervise: plan parsing, checks, git, the critic, and the loop
   src/tui/             terminal UI
 packages/tui           pi-tui, trimmed to the main-screen renderer, editor, markdown, and select list
 ```

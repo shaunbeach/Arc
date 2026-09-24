@@ -3,7 +3,7 @@ import { closeSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, writ
 import { networkInterfaces } from "node:os";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { hasFlag, type LiteModel } from "../config/models.ts";
+import { flagValue, hasFlag, type LiteModel } from "../config/models.ts";
 
 export type SpawnFunction = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
@@ -89,10 +89,10 @@ export async function waitForSlotsIdle(
 	return false;
 }
 
-/** `-m <modelPath>`, the model's launchArgs, then --port/--host from baseUrl when launchArgs leave them out. */
+/** `-m <modelPath>`, `--mmproj` when models.yml sets `mmproj`, the model's launchArgs, then --port/--host from baseUrl when launchArgs leave them out. */
 export function buildServerArgs(model: LiteModel, isHost = false): string[] {
 	const url = new URL(model.baseUrl);
-	const args = ["-m", model.modelPath, ...model.launchArgs];
+	const args = ["-m", model.modelPath, ...(model.mmproj ? ["--mmproj", model.mmproj] : []), ...model.launchArgs];
 	if (!hasFlag(model.launchArgs, ["--port"])) {
 		args.push("--port", url.port || (url.protocol === "https:" ? "443" : "80"));
 	}
@@ -104,6 +104,24 @@ export function buildServerArgs(model: LiteModel, isHost = false): string[] {
 		args.push("--host", url.hostname);
 	}
 	return args;
+}
+
+/**
+ * `model` as the supervisor launches its actor: llama-server may save and restore slot 0's KV cache as files in
+ * `dir`, and runs one slot, so slot 0 is the one every request uses. Flags launchArgs already set are kept.
+ */
+export function withSlotSavePath(model: LiteModel, dir: string): LiteModel {
+	const launchArgs = [...model.launchArgs];
+	if (!hasFlag(launchArgs, ["--slot-save-path"])) launchArgs.push("--slot-save-path", dir);
+	if (!hasFlag(launchArgs, ["-np", "--parallel"])) launchArgs.push("--parallel", "1");
+	return { ...model, launchArgs };
+}
+
+/** What a slot save or restore moved, from llama-server's reply. */
+export interface SlotResult {
+	tokens: number;
+	bytes: number;
+	ms: number;
 }
 
 function isRunning(child: ChildProcess): boolean {
@@ -128,6 +146,7 @@ function samePath(a: string, b: string): boolean {
 function sameServer(a: LiteModel, b: LiteModel): boolean {
 	return (
 		samePath(a.modelPath, b.modelPath) &&
+		a.mmproj === b.mmproj &&
 		a.baseUrl === b.baseUrl &&
 		a.llamaServer === b.llamaServer &&
 		a.launchArgs.length === b.launchArgs.length &&
@@ -236,6 +255,53 @@ export class LlamaServerManager {
 		return waitForSlotsIdle(serverOrigin(this.active.baseUrl), timeoutMs, this.fetchFn, signal);
 	}
 
+	/**
+	 * Write slot 0's KV cache to `filename` in the server's `--slot-save-path`, so a restarted server can read it back
+	 * instead of processing the whole prompt again. `filename` is a bare name: llama-server rejects paths.
+	 */
+	saveSlot(filename: string, signal?: AbortSignal): Promise<SlotResult> {
+		return this.slotAction("save", filename, signal);
+	}
+
+	/** Load slot 0's KV cache from a file `saveSlot` wrote. The next request reuses it where its prompt matches. */
+	restoreSlot(filename: string, signal?: AbortSignal): Promise<SlotResult> {
+		return this.slotAction("restore", filename, signal);
+	}
+
+	private async slotAction(action: "save" | "restore", filename: string, signal?: AbortSignal): Promise<SlotResult> {
+		const model = this.active;
+		if (!model) throw new Error(`Cannot ${action} a slot: no llama-server is running.`);
+		const response = await this.fetchFn(`${serverOrigin(model.baseUrl)}/slots/0?action=${action}`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				...(model.apiKey ? { Authorization: `Bearer ${model.apiKey}` } : {}),
+			},
+			body: JSON.stringify({ filename }),
+			signal,
+		});
+		const body = (await response.json().catch(() => undefined)) as
+			| {
+					n_saved?: number;
+					n_restored?: number;
+					n_written?: number;
+					n_read?: number;
+					timings?: { save_ms?: number; restore_ms?: number };
+					error?: { message?: string };
+			  }
+			| undefined;
+		if (!response.ok) {
+			// 501 means the server was started without --slot-save-path.
+			const detail = body?.error?.message ?? response.statusText;
+			throw new Error(`llama-server could not ${action} slot 0 (HTTP ${response.status}): ${detail}`);
+		}
+		return {
+			tokens: body?.n_saved ?? body?.n_restored ?? 0,
+			bytes: body?.n_written ?? body?.n_read ?? 0,
+			ms: body?.timings?.save_ms ?? body?.timings?.restore_ms ?? 0,
+		};
+	}
+
 	/** Start serving model on 0.0.0.0 as a remote host, streaming logs to callback. */
 	async startHost(
 		model: LiteModel,
@@ -302,6 +368,9 @@ export class LlamaServerManager {
 	private spawnServer(model: LiteModel, isHost = false, onLogLine?: (line: string) => void): ChildProcess {
 		const args = buildServerArgs(model, isHost);
 		mkdirSync(dirname(this.logFile), { recursive: true });
+		// llama-server does not create its slot directory; saving into a missing one fails only at the first save.
+		const slotDir = flagValue(model.launchArgs, ["--slot-save-path"]);
+		if (slotDir) mkdirSync(slotDir, { recursive: true });
 		this.spawnError = undefined;
 
 		if (onLogLine) {

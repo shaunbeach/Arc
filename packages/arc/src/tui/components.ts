@@ -16,6 +16,7 @@ import type { SamplingMode } from "../config/sampling.ts";
 import type { AssistantMessage, ToolCall } from "../llm/types.ts";
 import type { PonytailLevel } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
+import type { SupervisorState } from "../supervisor/supervisor.ts";
 import { accent, renderLogo } from "./logo.ts";
 import { markdownTheme, style } from "./theme.ts";
 
@@ -524,6 +525,8 @@ export interface FooterState {
 	rag?: boolean;
 	/** The `/ponytail` level. */
 	ponytail?: PonytailLevel;
+	/** The session's `/supervise` loop, if any. */
+	supervisor?: Pick<SupervisorState, "phase" | "failures" | "status">;
 	/** The model hosted with `/serve`, while it runs. */
 	serving?: { modelName: string; port: string };
 	/** Estimated prompt size after `/compact`, shown until the next reply reports what the server measured. */
@@ -583,6 +586,15 @@ export function formatFooter(state: FooterState): string {
 		if (state.rag) parts.push(style.cyan("[rag]"));
 		if (state.ponytail && state.ponytail !== "off")
 			parts.push(style.magenta(`[P:${state.ponytail[0].toUpperCase()}${state.ponytail.slice(1)}]`));
+		const supervisor = state.supervisor;
+		if (supervisor && supervisor.status !== "done") {
+			const failed = supervisor.failures > 0 ? ` ${supervisor.failures} failed` : "";
+			const running = supervisor.status === "running";
+			const label = `[phase ${supervisor.phase}${failed}${running ? "" : ` ${supervisor.status}`}]`;
+			parts.push(
+				supervisor.status === "halted" ? style.red(label) : running ? style.cyan(label) : style.gray(label),
+			);
+		}
 		parts.push(statusBracket);
 
 		const usage = state.lastReply?.usage;

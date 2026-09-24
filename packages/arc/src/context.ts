@@ -112,6 +112,20 @@ export class ContextWindow {
 	}
 
 	/**
+	 * Leave everything before `index` out of later requests, as if trimming had dropped it: the supervisor starts each
+	 * phase this way, so the actor has its whole window for the new work. It never moves the cut back, since trimming
+	 * may already have passed `index` within the phase. A message must be at `index`, or be added there next.
+	 */
+	startAt(index: number): void {
+		if (index <= this.start) return;
+		this.start = index;
+		this.omittedStepsBefore = 0;
+		this.thinkingBefore = Math.max(this.thinkingBefore, index);
+		this.measuredFrom = Math.max(this.measuredFrom, index);
+		this.workLog = undefined;
+	}
+
+	/**
 	 * Applies compaction decisions made outside a request, such as `/compact`. Later requests send the compacted steps
 	 * the same way automatic trimming would; the transcript is left as it is.
 	 */

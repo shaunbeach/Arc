@@ -18,6 +18,9 @@ export type CommandName =
 	| "clear"
 	| "resume"
 	| "name"
+	| "supervise"
+	| "audit"
+	| "usage"
 	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
@@ -47,6 +50,13 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 		argumentHint: "[number|name|id]",
 	},
 	{ name: "name", description: "Name this session, for the banner and /resume", argumentHint: "<text>" },
+	{
+		name: "supervise",
+		description: "Work through a phased plan: actor builds, checks and a critic judge each phase",
+		argumentHint: "[plan.md|resume|stop]",
+	},
+	{ name: "audit", description: "Check and judge the current supervised phase now", argumentHint: "[critic]" },
+	{ name: "usage", description: "Show the tokens this session used, in and out" },
 	{ name: "quit", description: "Exit" },
 ];
 
@@ -101,6 +111,8 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		web: complete(["on", "off"]),
 		rag: complete(["on", "off"]),
 		ponytail: complete(PONYTAIL_LEVELS),
+		supervise: complete(["resume", "stop"]),
+		audit: complete(models.filter((model) => !model.discover).map((model) => model.name)),
 	};
 	return COMMANDS.map((command) => ({
 		name: command.name,

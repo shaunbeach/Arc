@@ -198,6 +198,57 @@ describe("parseModelsConfig", () => {
 	});
 });
 
+describe("mmproj", () => {
+	const vision = (extra: string) => `
+providers:
+  llamacpp:
+    baseUrl: http://localhost:8080/v1
+    modelDir: /models
+    models:
+      - id: ornith.gguf
+        contextWindow: 65536
+${extra}`;
+
+	it("resolves mmproj like id and turns on image input", () => {
+		const [model] = parse(vision("        mmproj: mmproj-ornith.gguf")).models;
+		expect(model.mmproj).toBe("/models/mmproj-ornith.gguf");
+		expect(model.input).toEqual(["text", "image"]);
+	});
+
+	it("leaves a model without one as it was", () => {
+		const [model] = parse(vision("")).models;
+		expect(model.mmproj).toBeUndefined();
+		expect(model.input).toEqual(["text"]);
+	});
+
+	it("refuses mmproj next to --mmproj in launchArgs", () => {
+		expect(() => parse(vision('        mmproj: /p.gguf\n        launchArgs: ["--mmproj", "/p.gguf"]'))).toThrow(
+			/keep one/,
+		);
+	});
+});
+
+describe("supervisor", () => {
+	const withSupervisor = (block: string) => `${CONFIG}\n${block}`;
+
+	it("resolves the critic to its model name and defaults maxRetries to 3", () => {
+		expect(parse(withSupervisor("supervisor:\n  critic: qwen3.5")).supervisor).toEqual({
+			critic: "Qwen3.5-4B-Q6_K",
+			maxRetries: 3,
+			attemptMinutes: 90,
+		});
+		expect(
+			parse(withSupervisor("supervisor:\n  critic: Qwen3.5-4B-Q6_K\n  maxRetries: 5")).supervisor?.maxRetries,
+		).toBe(5);
+		expect(parse(CONFIG).supervisor).toBeUndefined();
+	});
+
+	it("needs a critic that names a model", () => {
+		expect(() => parse(withSupervisor("supervisor:\n  maxRetries: 2"))).toThrow(/supervisor.critic is required/);
+		expect(() => parse(withSupervisor("supervisor:\n  critic: nobody"))).toThrow(/names no model: nobody/);
+	});
+});
+
 describe("findModel", () => {
 	const { models } = parse(CONFIG);
 

@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
 	CombinedAutocompleteProvider,
@@ -47,7 +49,21 @@ import {
 	type SessionSummary,
 	sessionLabel,
 } from "../session.ts";
+import { asCritic } from "../supervisor/critic.ts";
+import { isClean, isGitRepo } from "../supervisor/git.ts";
+import { RepeatGuard } from "../supervisor/guard.ts";
+import { PlanError } from "../supervisor/plan.ts";
+import {
+	type ActorOutcome,
+	type ActorResult,
+	readPlan,
+	Supervisor,
+	type SupervisorHost,
+	type SupervisorState,
+	startState,
+} from "../supervisor/supervisor.ts";
 import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
+import { formatUsage, tallyUsage } from "../usage.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
 import {
 	type AiStatus,
@@ -175,6 +191,12 @@ class InteractiveApp {
 	private swapCooldown: AbortController | undefined;
 	/** A running `/compact`; esc cancels it. */
 	private compactRun: AbortController | undefined;
+	/** The session's `/supervise` loop, running or not. */
+	private supervisor: Supervisor | undefined;
+	/** The running `/supervise` loop; esc stops it. */
+	private supervisorRun: AbortController | undefined;
+	/** A critic named with `/audit <model>`, used instead of models.yml's until the loop stops. */
+	private criticOverride: string | undefined;
 	/** Serializes llama-server startups, so a model switch and a prompt never start two servers. */
 	private serverTask: Promise<boolean> = Promise.resolve(true);
 	private serverStart: AbortController | undefined;
@@ -216,6 +238,7 @@ class InteractiveApp {
 		}
 		this.lastReply = options.session ? lastReplyWithUsage(options.session.messages) : undefined;
 		this.sessionName = options.session?.name;
+		this.supervisor = this.restoredSupervisor(options.session?.supervisor);
 		this.contextEstimate = undefined;
 		recordSession(this.agent, () => this.session);
 		this.agent.subscribe((event) => this.onAgentEvent(event));
@@ -276,7 +299,8 @@ class InteractiveApp {
 			this.agent.isRunning ||
 			this.serverStart !== undefined ||
 			this.swapCooldown !== undefined ||
-			this.compactRun !== undefined;
+			this.compactRun !== undefined ||
+			this.supervisorRun !== undefined;
 		if (matchesAction(data, "abort") && working) {
 			this.abort();
 			return { consume: true };
@@ -317,7 +341,8 @@ class InteractiveApp {
 		} else if (this.agent.isRunning) {
 			this.agent.enqueue(input);
 			this.notice(style.gray(`queued: ${input}`));
-		} else if (this.busy) {
+		} else if (this.busy || this.supervisorRun) {
+			// While the loop runs the checks or the critic, a message waits for the actor's next turn.
 			this.pending.push(input);
 			this.notice(style.gray(`queued: ${input}`));
 		} else {
@@ -330,6 +355,7 @@ class InteractiveApp {
 		this.serverStart?.abort();
 		this.swapCooldown?.abort();
 		this.compactRun?.abort();
+		this.supervisorRun?.abort();
 		this.serveAbortController?.abort();
 		this.swapMonitor?.stop();
 		this.swapMonitor = undefined;
@@ -342,18 +368,24 @@ class InteractiveApp {
 		this.updateFooter();
 	}
 
-	private async runPrompt(input: string): Promise<void> {
+	/**
+	 * Send `input`, then anything queued meanwhile, until the agent is done. Says how the last turn ended. With
+	 * `restoreInput` false (the supervisor's own messages), a failed start hands back only what the user typed.
+	 */
+	private async runPrompt(input: string, restoreInput = true): Promise<ActorOutcome> {
 		if (!this.agent.model) {
 			this.notice(style.yellow("No model loaded. Please select a model with /model"));
 			this.pickModel();
-			return;
+			return "error";
 		}
 		this.busy = true;
+		let outcome: ActorOutcome = "done";
 		try {
 			let next: string | undefined = input;
 			while (next !== undefined) {
 				if (!(await this.ensureServer())) {
-					this.restoreQueued(next);
+					this.restoreQueued(next === input && !restoreInput ? "" : next);
+					outcome = this.supervisorRun?.signal.aborted ? "aborted" : "error";
 					break;
 				}
 				this.setStatus("working");
@@ -365,13 +397,20 @@ class InteractiveApp {
 				this.setAiStatus("idle");
 				this.updateFooter();
 
+				const last = this.agent.messages.at(-1);
+				outcome =
+					last?.role === "assistant" && last.stopReason === "aborted"
+						? "aborted"
+						: last?.role === "assistant" && last.stopReason === "error"
+							? "error"
+							: "done";
+
 				await this.checkSwapAndRecycleIfNeeded();
 
 				const queued = [...this.pending, ...this.agent.takeQueued().map(userText)];
 				this.pending = [];
 				if (queued.length === 0) break;
-				const last = this.agent.messages.at(-1);
-				if (last?.role === "assistant" && last.stopReason === "aborted") {
+				if (outcome === "aborted") {
 					// Do not run queued messages after an abort; hand them back for editing.
 					this.restoreQueued(queued.join("\n\n"));
 					break;
@@ -383,6 +422,7 @@ class InteractiveApp {
 			this.setStatus(undefined);
 			this.setAiStatus("idle");
 		}
+		return outcome;
 	}
 
 	private async checkSwapAndRecycleIfNeeded(): Promise<void> {
@@ -580,6 +620,15 @@ class InteractiveApp {
 				return;
 			case "name":
 				this.nameSession(args);
+				return;
+			case "supervise":
+				void this.superviseCommand(args);
+				return;
+			case "audit":
+				void this.audit(args);
+				return;
+			case "usage":
+				this.showUsage();
 				return;
 			case "quit":
 				this.stop();
@@ -789,14 +838,214 @@ class InteractiveApp {
 		}
 	}
 
+	// Supervisor
+
+	/** What the `/supervise` loop needs from the app: the actor turns, the critic's server, the screen, the session. */
+	private supervisorHost(): SupervisorHost {
+		return {
+			cwd: this.options.cwd,
+			maxRetries: this.options.config.supervisor?.maxRetries ?? 3,
+			transcriptLength: () => this.agent.messages.length,
+			runActor: async (text, contextStart, signal): Promise<ActorResult> => {
+				if (signal.aborted) return "aborted";
+				this.agent.startContextAt(contextStart);
+				// The loop guard: a turn that repeats itself or runs too long is ended, and the phase checked.
+				let stuck: string | undefined;
+				const stop = (reason: string) => {
+					if (stuck) return;
+					stuck = reason;
+					this.agent.abort();
+				};
+				const guard = new RepeatGuard();
+				const unsubscribe = this.agent.subscribe((event) => {
+					if (event.type !== "tool_execution_start") return;
+					const reason = guard.check(event.toolCall);
+					if (reason) stop(reason);
+				});
+				const minutes = this.options.config.supervisor?.attemptMinutes ?? 90;
+				const timer = setTimeout(() => stop(`the turn ran past ${minutes} minutes`), minutes * 60_000);
+				// Messages typed while the checks or the critic ran go with this turn.
+				const typed = this.pending.splice(0);
+				try {
+					const outcome = await this.runPrompt([text, ...typed].join("\n\n"), false);
+					return stuck && !signal.aborted ? { stuck } : outcome;
+				} finally {
+					clearTimeout(timer);
+					unsubscribe();
+				}
+			},
+			loadCritic: async (signal) => {
+				const name = this.criticOverride ?? this.options.config.supervisor?.critic;
+				const found = name ? findModel(this.options.config.models, name) : undefined;
+				if (!found) throw new Error(`No critic: ${name ?? "models.yml has no supervisor.critic"}.`);
+				const critic = asCritic(found);
+				await this.serverTask;
+				this.setAiStatus("working");
+				try {
+					await this.options.manager.ensure(critic, { signal, onStatus: (message) => this.setStatus(message) });
+				} finally {
+					this.setAiStatus("idle");
+				}
+				return critic;
+			},
+			save: (state) => {
+				this.session?.setSupervisor(state);
+				this.updateFooter();
+			},
+			notice: (text, tone) =>
+				this.notice(tone === "good" ? style.green(text) : tone === "bad" ? style.red(text) : style.gray(text)),
+			status: (text) => this.setStatus(text, "esc to stop the supervisor"),
+			notify: (text) => notify(text),
+		};
+	}
+
+	/** A loop saved in a session. One that was running when Arc last exited is stopped now. */
+	private restoredSupervisor(state: SupervisorState | undefined): Supervisor | undefined {
+		if (!state) return undefined;
+		return new Supervisor(
+			this.supervisorHost(),
+			state.status === "running" ? { ...state, status: "stopped" } : state,
+		);
+	}
+
+	/** `/supervise <plan>` starts, `/supervise resume` continues, `/supervise stop` stops, `/supervise` shows status. */
+	private async superviseCommand(args: string): Promise<void> {
+		const arg = args.trim();
+		if (arg === "stop") {
+			if (this.supervisorRun) this.abort();
+			else this.notice(style.gray("The supervisor is not running."));
+			return;
+		}
+		if (arg === "") {
+			this.notice(style.gray(this.describeSupervisor()));
+			return;
+		}
+		if (!this.requireIdle()) return;
+		if (arg === "resume") {
+			const state = this.supervisor?.state;
+			if (!state) this.notice(style.yellow("Nothing to resume. Start with /supervise <plan.md>."));
+			else if (state.status === "done") this.notice(style.gray("Every phase of this plan has passed."));
+			else await this.runSupervisor();
+			return;
+		}
+		await this.startSupervisor(arg);
+	}
+
+	private async startSupervisor(planArg: string): Promise<void> {
+		const config = this.options.config.supervisor;
+		const cwd = this.options.cwd;
+		const refuse = (text: string) => this.notice(style.yellow(text));
+		if (!config) {
+			refuse(
+				"No critic is set up. Add this to models.yml:\n  supervisor:\n    critic: <model name>\n    maxRetries: 3",
+			);
+			return;
+		}
+		if (!this.agent.model) return refuse("Pick the actor with /model first.");
+		if (this.agent.model.name === config.critic) return refuse("The actor and the critic must be different models.");
+		if (this.agent.interactionMode !== "agent") return refuse("The actor needs its tools. Switch with /agent first.");
+		const plan = resolve(cwd, planArg);
+		if (!existsSync(plan)) return refuse(`No plan at ${plan}.`);
+		try {
+			if (!(await isGitRepo(cwd))) return refuse("The supervisor commits each passed phase: run git init first.");
+			if (!(await isClean(cwd))) {
+				return refuse("Commit or stash your changes first, or they would land in the first phase's commit.");
+			}
+			await readPlan(plan);
+			const state = await startState(plan, cwd);
+			if (!state) return refuse("Every phase of this plan already has a passed commit.");
+			this.supervisor = new Supervisor(this.supervisorHost(), state);
+		} catch (error) {
+			this.notice(style.red(error instanceof PlanError ? `Plan: ${error.message}` : errorText(error)));
+			return;
+		}
+		await this.runSupervisor();
+	}
+
+	/** `/audit [critic]`: judge the current phase now instead of waiting for the actor, then carry on. */
+	private async audit(args: string): Promise<void> {
+		if (!this.requireIdle()) return;
+		const state = this.supervisor?.state;
+		if (!state || state.status === "done") {
+			this.notice(style.yellow("No phase to audit. Start with /supervise <plan.md>."));
+			return;
+		}
+		if (args.trim()) {
+			const critic = findModel(this.options.config.models, args.trim());
+			if (!critic || critic.discover) {
+				this.notice(style.red(`No local model matches "${args.trim()}".`));
+				return;
+			}
+			this.criticOverride = critic.name;
+		}
+		await this.runSupervisor("audit");
+	}
+
+	private async runSupervisor(begin?: "audit"): Promise<void> {
+		const supervisor = this.supervisor;
+		if (!supervisor) return;
+		const controller = new AbortController();
+		this.supervisorRun = controller;
+		this.updateFooter();
+		try {
+			await supervisor.run(controller.signal, begin);
+		} finally {
+			this.supervisorRun = undefined;
+			this.criticOverride = undefined;
+			this.setStatus(undefined);
+			this.updateFooter();
+		}
+		// A critic left loaded would hold its memory until the next message; the user may be away for hours.
+		const { manager } = this.options;
+		if (manager.model && manager.model.name !== this.agent.model?.name) await manager.stop();
+		if (this.pending.length > 0) {
+			const next = this.pending.join("\n\n");
+			this.pending = [];
+			void this.runPrompt(next);
+		}
+	}
+
+	/** `/usage`: the tokens this session's replies used, and the critic's while supervising. */
+	private showUsage(): void {
+		const actor = tallyUsage(this.agent.messages);
+		const critic = this.supervisor?.state.criticUsage;
+		const lines = [`Tokens this session: ${formatUsage(actor)}.`];
+		if (critic) lines.push(`Critic: ${formatUsage(critic)}.`);
+		this.notice(style.gray(lines.join("\n")));
+	}
+
+	private describeSupervisor(): string {
+		const state = this.supervisor?.state;
+		if (!state) return "No supervisor in this session. Start one with /supervise <plan.md>.";
+		const plan = relative(this.options.cwd, state.plan) || state.plan;
+		const lines = [`Supervising ${plan}: phase ${state.phase}, ${state.status}, ${state.failures} failed attempts.`];
+		if (state.haltReason) lines.push(`Halted: ${state.haltReason}`);
+		lines.push(`Actor tokens this session: ${formatUsage(tallyUsage(this.agent.messages))}.`);
+		if (state.criticUsage) lines.push(`Critic tokens: ${formatUsage(state.criticUsage)}.`);
+		if (state.lastVerdict) {
+			lines.push(
+				state.lastVerdict.pass
+					? "Last verdict: pass."
+					: `Last verdict: fail.\n${state.lastVerdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
+			);
+		}
+		return lines.join("\n");
+	}
+
 	/** Commands that replace the model, transcript, or session must wait for the current request. */
 	private requireIdle(): boolean {
 		if (this.isServing) {
 			this.notice(style.yellow("Currently serving a model. Press esc to stop serving first."));
 			return false;
 		}
-		if (!this.busy && !this.agent.isRunning) return true;
-		this.notice(style.yellow("Wait for the current request to finish, or press esc to abort it."));
+		if (!this.busy && !this.agent.isRunning && !this.supervisorRun) return true;
+		this.notice(
+			style.yellow(
+				this.supervisorRun
+					? "The supervisor is running. /supervise stop or esc stops it."
+					: "Wait for the current request to finish, or press esc to abort it.",
+			),
+		);
 		return false;
 	}
 
@@ -1147,6 +1396,7 @@ class InteractiveApp {
 	private newSession(): void {
 		if (!this.requireIdle()) return;
 		this.agent.setMessages([]);
+		this.supervisor = undefined;
 		this.sessionName = undefined;
 		this.lastReply = undefined;
 		this.contextEstimate = undefined;
@@ -1246,6 +1496,7 @@ class InteractiveApp {
 
 		this.agent.setMessages(loaded.messages);
 		this.sessionName = loaded.name;
+		this.supervisor = this.restoredSupervisor(loaded.supervisor);
 		this.agent.model = model;
 		this.agent.mode = savedModel && saved ? saved.mode : this.agent.mode;
 		this.agent.setInteractionMode(saved?.interactionMode ?? "agent");
@@ -1389,6 +1640,7 @@ class InteractiveApp {
 				web: this.agent.web,
 				rag: this.agent.rag,
 				ponytail: this.agent.ponytail,
+				supervisor: this.supervisor?.state,
 				serving: this.serving,
 				aiStatus: this.aiStatus,
 				contextTokens: this.contextEstimate,
@@ -1419,6 +1671,13 @@ class InteractiveApp {
 		clearInterval(this.statusTimer);
 		this.tui.stop();
 	}
+}
+
+/** A macOS notification, for a person away from the terminal. Elsewhere, or if it fails, nothing happens. */
+function notify(text: string): void {
+	if (process.platform !== "darwin") return;
+	const quoted = text.replace(/["\\]/g, "");
+	execFile("osascript", ["-e", `display notification "${quoted}" with title "Arc Supervisor"`], () => {});
 }
 
 /** A `discover` entry that has not been connected yet: it still names no GGUF. */

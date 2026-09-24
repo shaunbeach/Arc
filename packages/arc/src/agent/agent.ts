@@ -110,6 +110,11 @@ export class Agent {
 		this.contextWindow.reset();
 	}
 
+	/** Leave the transcript before `index` out of later requests (see `ContextWindow.startAt`). */
+	startContextAt(index: number): void {
+		this.contextWindow.startAt(index);
+	}
+
 	/** Queue a message typed while the agent works. It goes out with the next request of the current run. */
 	enqueue(text: string): void {
 		this.queue.push(userMessage(text));

@@ -188,6 +188,14 @@ describe("Line and footer", () => {
 		expect(formatFooter({ model, mode: "instruct", ponytail: "off" }).replace(/\x1b\[\d+m/g, "")).toBe(
 			" Qwen-27B · instruct · [idle]",
 		);
+		const phase = (status: "running" | "halted" | "stopped" | "done", failures = 0) =>
+			formatFooter({ model, mode: "instruct", supervisor: { phase: 2, failures, status } }).replace(
+				/\x1b\[\d+m/g,
+				"",
+			);
+		expect(phase("running")).toBe(" Qwen-27B · instruct · [phase 2] · [idle]");
+		expect(phase("halted", 3)).toBe(" Qwen-27B · instruct · [phase 2 3 failed halted] · [idle]");
+		expect(phase("done")).toBe(" Qwen-27B · instruct · [idle]");
 		// While hosting, the footer names the served model, with or without a model selected for prompts.
 		const serving = { modelName: "Qwen-27B-host", port: "18555" };
 		for (const selected of [undefined, model]) {
@@ -209,6 +217,11 @@ describe("commands", () => {
 		expect(parseCommand("/plan")).toEqual({ name: "plan", args: "" });
 		expect(parseCommand("/rag on")).toEqual({ name: "rag", args: "on" });
 		expect(parseCommand("/ponytail ultra")).toEqual({ name: "ponytail", args: "ultra" });
+		expect(parseCommand("/supervise docs/implementation.md")).toEqual({
+			name: "supervise",
+			args: "docs/implementation.md",
+		});
+		expect(parseCommand("/audit ornith")).toEqual({ name: "audit", args: "ornith" });
 		expect(parseCommand("/chat")).toEqual({ name: "chat", args: "" });
 		expect(parseCommand("/model  qwen 27b ")).toEqual({ name: "model", args: "qwen 27b" });
 		expect(parseCommand("/models")).toEqual({ name: "model", args: "" });

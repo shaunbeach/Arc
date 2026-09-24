@@ -41,6 +41,8 @@ export interface LiteModel {
 	maxTokens: number;
 	/** Absolute GGUF path passed to `llama-server -m`. */
 	modelPath: string;
+	/** Absolute path of the vision projector passed as `--mmproj`, from models.yml `mmproj`. Implies image input. */
+	mmproj?: string;
 	launchArgs: string[];
 	/** llama-server executable. */
 	llamaServer: string;
@@ -60,6 +62,17 @@ export interface ModelsConfig {
 	warnings: string[];
 	/** The knowledge base for `/rag`, when models.yml has a `rag:` section. */
 	rag?: RagConfig;
+	/** `/supervise` settings, when models.yml has a `supervisor:` section. */
+	supervisor?: SupervisorConfig;
+}
+
+export interface SupervisorConfig {
+	/** Name of the models.yml entry that judges each phase. */
+	critic: string;
+	/** Failed attempts at one phase before the loop halts. Default: 3. */
+	maxRetries: number;
+	/** Minutes one actor turn may run before the loop guard ends it and the phase is checked. Default: 90. */
+	attemptMinutes: number;
 }
 
 export class ModelsConfigError extends Error {
@@ -326,11 +339,19 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 				throw configError(`${modelAt}.launchArgs`, "must not set -m/--model; the model path comes from id");
 			}
 
-			const expandedId = expandHome(id);
-			let modelPath: string;
-			if (isAbsolute(expandedId)) modelPath = expandedId;
-			else if (modelDir) modelPath = join(modelDir, expandedId);
-			else throw configError(`${modelAt}.id`, `is a relative path but ${at}.modelDir is not set`);
+			const gguf = (path: string, key: string): string => {
+				const expanded = expandHome(path);
+				if (isAbsolute(expanded)) return expanded;
+				if (modelDir) return join(modelDir, expanded);
+				throw configError(`${modelAt}.${key}`, `is a relative path but ${at}.modelDir is not set`);
+			};
+			const modelPath = gguf(id, "id");
+			const mmprojText = readString(raw, "mmproj", modelAt);
+			if (mmprojText !== undefined && hasFlag(launchArgs, ["--mmproj", "-mm"])) {
+				throw configError(`${modelAt}.mmproj`, "is set, and so is --mmproj in launchArgs; keep one");
+			}
+			const mmproj = mmprojText === undefined ? undefined : gguf(mmprojText, "mmproj");
+			if (mmproj && !input.includes("image")) input.push("image");
 
 			const urlPort = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
 			const port = flagValue(launchArgs, ["--port"]);
@@ -358,6 +379,7 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 				contextWindow,
 				maxTokens,
 				modelPath,
+				...(mmproj ? { mmproj } : {}),
 				launchArgs,
 				llamaServer,
 				defaultMode: mode,
@@ -380,7 +402,22 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 		};
 		if (!existsSync(rag.folder)) warnings.push(`rag.zimFolder not found: ${rag.folder}`);
 	}
-	return { path, models, warnings, ...(rag ? { rag } : {}) };
+	// `supervisor:` names the critic `/supervise` loads between phases.
+	let supervisor: SupervisorConfig | undefined;
+	if (root.supervisor !== undefined) {
+		if (!isRecord(root.supervisor)) throw configError("supervisor", "must be a mapping");
+		const critic = readString(root.supervisor, "critic", "supervisor");
+		if (!critic) throw configError("supervisor.critic", "is required");
+		const model = findModel(models, critic);
+		if (!model) throw configError("supervisor.critic", `names no model: ${critic}`);
+		if (model.discover) throw configError("supervisor.critic", "must be a model Arc can start, not a discover entry");
+		supervisor = {
+			critic: model.name,
+			maxRetries: readPositiveInt(root.supervisor, "maxRetries", "supervisor") ?? 3,
+			attemptMinutes: readPositiveInt(root.supervisor, "attemptMinutes", "supervisor") ?? 90,
+		};
+	}
+	return { path, models, warnings, ...(rag ? { rag } : {}), ...(supervisor ? { supervisor } : {}) };
 }
 
 /** Exact name or id, then case-insensitive name, then a unique case-insensitive substring of a name. */

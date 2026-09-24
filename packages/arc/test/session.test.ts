@@ -32,6 +32,16 @@ const entries = (path: string) =>
 		.map((line) => JSON.parse(line));
 
 describe("SessionFile", () => {
+	it("keeps the latest supervisor state, including one saved before the first message", () => {
+		const file = SessionFile.create(appDir(), "/work/project", settings);
+		const state = { plan: "/p/plan.md", status: "running" as const, phase: 1, stage: "actor" as const, failures: 0 };
+		file.setSupervisor(state);
+		file.appendMessage(user("hi"));
+		expect(loadSession(file.path).supervisor).toEqual(state);
+		file.setSupervisor({ ...state, status: "halted", failures: 3 });
+		expect(loadSession(file.path).supervisor).toMatchObject({ status: "halted", failures: 3 });
+	});
+
 	it("creates the file with the first message and appends after that", () => {
 		const file = SessionFile.create(appDir(), "/work/project", settings);
 		expect(existsSync(file.path)).toBe(false);

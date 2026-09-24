@@ -11,6 +11,7 @@ import {
 	LlamaServerManager,
 	serverOrigin,
 	waitForSlotsIdle,
+	withSlotSavePath,
 } from "../src/llm/server.ts";
 
 const model: LiteModel = {
@@ -417,5 +418,88 @@ describe("LlamaServerManager", () => {
 
 		const idle = await waitForSlotsIdle("http://localhost:8080", 500, fetchMock, undefined, 10);
 		expect(idle).toBe(true);
+	});
+});
+
+describe("mmproj", () => {
+	it("passes the projector right after the model", () => {
+		expect(buildServerArgs({ ...model, mmproj: "/models/mm.gguf" }).slice(0, 4)).toEqual([
+			"-m",
+			"/models/test.gguf",
+			"--mmproj",
+			"/models/mm.gguf",
+		]);
+	});
+});
+
+describe("slot save and restore", () => {
+	it("adds --slot-save-path and one slot, keeping flags launchArgs set", () => {
+		expect(withSlotSavePath(model, "/slots").launchArgs).toEqual([
+			"--ctx-size",
+			"4096",
+			"--slot-save-path",
+			"/slots",
+			"--parallel",
+			"1",
+		]);
+		const own = { ...model, launchArgs: ["--slot-save-path=/mine", "-np", "2"] };
+		expect(withSlotSavePath(own, "/slots").launchArgs).toEqual(own.launchArgs);
+	});
+
+	it("posts slot actions to slot 0, creates the slot directory, and reports what moved", async () => {
+		const slotDir = join(mkdtempSync(join(tmpdir(), "arc-slots-")), "slots");
+		const requests: { url: string; body: string; auth: string | null }[] = [];
+		let spawned = false;
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			pollIntervalMs: 1,
+			spawn: (command: string) => {
+				spawned = true;
+				return new FakeChild(command) as unknown as ChildProcess;
+			},
+			fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/health") return spawned ? new Response("{}") : Promise.reject(new TypeError("down"));
+				requests.push({
+					url: `${url.pathname}${url.search}`,
+					body: String(init?.body),
+					auth: new Headers(init?.headers).get("authorization"),
+				});
+				return url.search === "?action=save"
+					? Response.json({ n_saved: 1200, n_written: 5_000_000, timings: { save_ms: 42.5 } })
+					: Response.json({ n_restored: 1200, n_read: 5_000_000, timings: { restore_ms: 17 } });
+			}) as typeof fetch,
+		});
+
+		await expect(manager.saveSlot("s.bin")).rejects.toThrow(/no llama-server is running/);
+		await manager.ensure({ ...withSlotSavePath(model, slotDir), apiKey: "k" });
+		expect(readdirSync(slotDir)).toEqual([]);
+		expect(await manager.saveSlot("s.bin")).toEqual({ tokens: 1200, bytes: 5_000_000, ms: 42.5 });
+		expect(await manager.restoreSlot("s.bin")).toEqual({ tokens: 1200, bytes: 5_000_000, ms: 17 });
+		expect(requests).toEqual([
+			{ url: "/slots/0?action=save", body: '{"filename":"s.bin"}', auth: "Bearer k" },
+			{ url: "/slots/0?action=restore", body: '{"filename":"s.bin"}', auth: "Bearer k" },
+		]);
+		await manager.stop();
+	});
+
+	it("says why llama-server refused a slot action", async () => {
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			fetch: routes((path) =>
+				path === "/props"
+					? Response.json({ model_path: "/models/test.gguf" })
+					: path === "/health"
+						? new Response("{}")
+						: Response.json(
+								{ error: { message: "This server does not support slots action." } },
+								{ status: 501 },
+							),
+			),
+		});
+		await manager.ensure(model);
+		await expect(manager.restoreSlot("s.bin")).rejects.toThrow(
+			"llama-server could not restore slot 0 (HTTP 501): This server does not support slots action.",
+		);
 	});
 });
