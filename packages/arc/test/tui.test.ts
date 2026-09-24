@@ -182,6 +182,12 @@ describe("Line and footer", () => {
 		expect(formatFooter({ model, mode: "instruct", rag: true }).replace(/\x1b\[\d+m/g, "")).toBe(
 			" Qwen-27B · instruct · [rag] · [idle]",
 		);
+		expect(formatFooter({ model, mode: "instruct", ponytail: "lite" }).replace(/\x1b\[\d+m/g, "")).toBe(
+			" Qwen-27B · instruct · [P:Lite] · [idle]",
+		);
+		expect(formatFooter({ model, mode: "instruct", ponytail: "off" }).replace(/\x1b\[\d+m/g, "")).toBe(
+			" Qwen-27B · instruct · [idle]",
+		);
 		// While hosting, the footer names the served model, with or without a model selected for prompts.
 		const serving = { modelName: "Qwen-27B-host", port: "18555" };
 		for (const selected of [undefined, model]) {
@@ -202,6 +208,7 @@ describe("commands", () => {
 		expect(parseCommand("/agent")).toEqual({ name: "agent", args: "" });
 		expect(parseCommand("/plan")).toEqual({ name: "plan", args: "" });
 		expect(parseCommand("/rag on")).toEqual({ name: "rag", args: "on" });
+		expect(parseCommand("/ponytail ultra")).toEqual({ name: "ponytail", args: "ultra" });
 		expect(parseCommand("/chat")).toEqual({ name: "chat", args: "" });
 		expect(parseCommand("/model  qwen 27b ")).toEqual({ name: "model", args: "qwen 27b" });
 		expect(parseCommand("/models")).toEqual({ name: "model", args: "" });

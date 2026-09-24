@@ -15,6 +15,7 @@ import type { Agent } from "./agent/agent.ts";
 import { isSamplingMode, type SamplingMode } from "./config/sampling.ts";
 import { userText } from "./llm/text.ts";
 import type { Message } from "./llm/types.ts";
+import { isPonytailLevel, type PonytailLevel } from "./ponytail.ts";
 import { type InteractionMode, isInteractionMode } from "./prompt.ts";
 
 const SESSION_VERSION = 1;
@@ -39,6 +40,8 @@ export interface SessionSettings {
 	web?: boolean;
 	/** True after `/rag on`. Missing means kb_search is off. */
 	rag?: boolean;
+	/** Set by `/ponytail`. Missing means off. */
+	ponytail?: Exclude<PonytailLevel, "off">;
 }
 
 function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boolean {
@@ -48,7 +51,8 @@ function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boole
 		a.mode === b.mode &&
 		(a.interactionMode ?? "agent") === (b.interactionMode ?? "agent") &&
 		(a.web ?? true) === (b.web ?? true) &&
-		(a.rag ?? false) === (b.rag ?? false)
+		(a.rag ?? false) === (b.rag ?? false) &&
+		(a.ponytail ?? "off") === (b.ponytail ?? "off")
 	);
 }
 
@@ -218,6 +222,9 @@ export function loadSession(path: string): LoadedSession {
 			}
 			if (entry.web === false) settings.web = false;
 			if (entry.rag === true) settings.rag = true;
+			const ponytail: unknown = entry.ponytail;
+			if (typeof ponytail === "string" && isPonytailLevel(ponytail) && ponytail !== "off")
+				settings.ponytail = ponytail;
 		} else if (entry.type === "name" && typeof entry.name === "string") {
 			name = entry.name;
 		}

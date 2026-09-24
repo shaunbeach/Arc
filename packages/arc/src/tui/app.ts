@@ -33,6 +33,7 @@ import {
 } from "../llm/swap-monitor.ts";
 import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
+import { isPonytailLevel, PONYTAIL_LEVEL_RULES, PONYTAIL_LEVELS } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
 import { KiwixKnowledgeBase } from "../rag/kiwix.ts";
 import {
@@ -203,6 +204,7 @@ class InteractiveApp {
 			interactionMode: options.session?.settings?.interactionMode,
 			web: options.session?.settings?.web,
 			rag: rag !== undefined && options.session?.settings?.rag === true,
+			ponytail: options.session?.settings?.ponytail,
 			tools: model ? createToolsForModel(model, cwd, this.toolOptions()) : [],
 			messages: options.session?.messages,
 		});
@@ -549,6 +551,10 @@ class InteractiveApp {
 			case "rag":
 				this.switchRag(args);
 				return;
+			case "ponytail":
+				if (args) this.setPonytail(args);
+				else this.pickPonytail();
+				return;
 			case "model":
 				if (args) this.switchModel(args);
 				else this.pickModel();
@@ -597,6 +603,7 @@ class InteractiveApp {
 			interactionMode: this.agent.interactionMode,
 			...(this.agent.web ? {} : { web: false }),
 			...(this.agent.rag ? { rag: true } : {}),
+			...(this.agent.ponytail === "off" ? {} : { ponytail: this.agent.ponytail }),
 		};
 	}
 
@@ -604,7 +611,8 @@ class InteractiveApp {
 		const mode = this.agent.interactionMode;
 		const inMode = mode === "agent" ? "" : ` in ${mode} mode`;
 		const named = this.sessionName ? ` "${this.sessionName}"` : "";
-		const tools = `${this.agent.web ? "" : ", web off"}${this.agent.rag ? ", rag on" : ""}`;
+		const ponytail = this.agent.ponytail === "off" ? "" : `, ponytail ${this.agent.ponytail}`;
+		const tools = `${this.agent.web ? "" : ", web off"}${this.agent.rag ? ", rag on" : ""}${ponytail}`;
 		return `Resumed session ${id.slice(0, 8)}${named}${inMode}${tools}.`;
 	}
 
@@ -673,6 +681,35 @@ class InteractiveApp {
 			if (!this.agent.isRunning) knowledgeBase.stop();
 			this.notice(style.gray(`Knowledge base off${note}.`));
 		}
+		this.updateFooter();
+	}
+
+	/** `/ponytail` with no argument: pick a level. */
+	private pickPonytail(): void {
+		const current = this.agent.ponytail;
+		const items: SelectItem[] = PONYTAIL_LEVELS.map((level) => ({
+			value: level,
+			label: level === current ? `${level} (current)` : level,
+			description: level === "off" ? "No ponytail rules" : PONYTAIL_LEVEL_RULES[level],
+		}));
+		this.pick("Ponytail level", items, (level) => this.setPonytail(level));
+	}
+
+	/** `/ponytail <level>`: add the ponytail rules to the system prompt at that level, or take them out with off. */
+	private setPonytail(arg: string): void {
+		const level = arg.trim().toLowerCase();
+		if (!isPonytailLevel(level)) {
+			this.notice(style.yellow("Use /ponytail off, lite, full, or ultra, or /ponytail to pick."));
+			return;
+		}
+		if (level === this.agent.ponytail) {
+			this.notice(style.gray(`Ponytail is already ${level}.`));
+			return;
+		}
+		this.agent.setPonytail(level);
+		if (this.agent.model) this.session?.updateSettings(this.sessionSettings(this.agent.model));
+		const note = this.agent.isRunning ? " (from the next message)" : "";
+		this.notice(style.gray(level === "off" ? `Ponytail off${note}.` : `Ponytail ${level}${note}.`));
 		this.updateFooter();
 	}
 
@@ -1122,13 +1159,20 @@ class InteractiveApp {
 		if (webBack) this.agent.setWeb(true);
 		const ragOff = this.agent.rag;
 		if (ragOff) this.agent.setRag(false);
+		const ponytailOff = this.agent.ponytail !== "off";
+		if (ponytailOff) this.agent.setPonytail("off");
 		if (this.options.saveSessions && this.agent.model) {
 			this.session = SessionFile.create(this.appDir, this.options.cwd, this.sessionSettings(this.agent.model));
 		} else {
 			this.session = undefined;
 		}
 		this.resetTranscript();
-		const back = [leftMode ? "agent mode" : "", webBack ? "web tools on" : "", ragOff ? "knowledge base off" : ""]
+		const back = [
+			leftMode ? "agent mode" : "",
+			webBack ? "web tools on" : "",
+			ragOff ? "knowledge base off" : "",
+			ponytailOff ? "ponytail off" : "",
+		]
 			.filter(Boolean)
 			.join(", ");
 		this.notice(style.gray(back ? `New session. Back to ${back}.` : "New session."));
@@ -1207,6 +1251,7 @@ class InteractiveApp {
 		this.agent.setInteractionMode(saved?.interactionMode ?? "agent");
 		this.agent.setWeb(saved?.web ?? true);
 		this.agent.setRag(this.knowledgeBase !== undefined && saved?.rag === true);
+		this.agent.setPonytail(saved?.ponytail ?? "off");
 		if (model && modelChanged) this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
 		if (this.options.saveSessions && model) {
 			this.session = SessionFile.resume(loaded, this.sessionSettings(model));
@@ -1224,7 +1269,10 @@ class InteractiveApp {
 
 	/** Temporarily put a picker where the editor is. */
 	private pick(title: string, items: SelectItem[], onSelect: (value: string) => void): void {
-		const list = new SelectList(items, Math.min(items.length, 10), selectListTheme, { maxPrimaryColumnWidth: 72 });
+		const list = new SelectList(items, Math.min(items.length, 10), selectListTheme, {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 72,
+		});
 		const close = () => {
 			this.picking = false;
 			this.editorSlot.clear();
@@ -1340,6 +1388,7 @@ class InteractiveApp {
 				interactionMode: this.agent.interactionMode,
 				web: this.agent.web,
 				rag: this.agent.rag,
+				ponytail: this.agent.ponytail,
 				serving: this.serving,
 				aiStatus: this.aiStatus,
 				contextTokens: this.contextEstimate,

@@ -14,6 +14,7 @@ import type { ToolResult } from "../agent/types.ts";
 import { type LiteModel, modelLabel } from "../config/models.ts";
 import type { SamplingMode } from "../config/sampling.ts";
 import type { AssistantMessage, ToolCall } from "../llm/types.ts";
+import type { PonytailLevel } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
 import { accent, renderLogo } from "./logo.ts";
 import { markdownTheme, style } from "./theme.ts";
@@ -521,6 +522,8 @@ export interface FooterState {
 	web?: boolean;
 	/** True after `/rag on`. */
 	rag?: boolean;
+	/** The `/ponytail` level. */
+	ponytail?: PonytailLevel;
 	/** The model hosted with `/serve`, while it runs. */
 	serving?: { modelName: string; port: string };
 	/** Estimated prompt size after `/compact`, shown until the next reply reports what the server measured. */
@@ -578,6 +581,8 @@ export function formatFooter(state: FooterState): string {
 		}
 		if (state.web === false) parts.push(style.yellow("[no web]"));
 		if (state.rag) parts.push(style.cyan("[rag]"));
+		if (state.ponytail && state.ponytail !== "off")
+			parts.push(style.magenta(`[P:${state.ponytail[0].toUpperCase()}${state.ponytail.slice(1)}]`));
 		parts.push(statusBracket);
 
 		const usage = state.lastReply?.usage;

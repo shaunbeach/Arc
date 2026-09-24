@@ -18,6 +18,7 @@ export const style = {
 	green: sgr(32, 39),
 	yellow: sgr(33, 39),
 	blue: sgr(34, 39),
+	magenta: sgr(35, 39),
 	cyan: sgr(36, 39),
 	gray: sgr(90, 39),
 };

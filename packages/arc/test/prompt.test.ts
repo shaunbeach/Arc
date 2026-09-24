@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { estimateTokens } from "../src/context.ts";
 import { toChatTools } from "../src/llm/llama-client.ts";
+import { PONYTAIL_LEVEL_RULES } from "../src/ponytail.ts";
 import { buildSystemPrompt, estimateFixedPromptTokens } from "../src/prompt.ts";
 import { createCodingTools, toolLimitsFor } from "../src/tools/index.ts";
 
@@ -67,6 +69,19 @@ describe("system prompt", () => {
 		const rag = buildSystemPrompt({ cwd: "/work/project", platform: "darwin", rag: true });
 		const added = estimateFixedPromptTokens(rag, withKb) - estimateFixedPromptTokens(systemPrompt, tools);
 		expect(added).toBeLessThan(150);
+	});
+
+	it("adds the ponytail rules only while ponytail is on, for under 300 more tokens", () => {
+		for (const mode of ["agent", "plan", "chat"] as const) {
+			const options = { cwd: "/work/project", platform: "darwin", interactionMode: mode };
+			expect(buildSystemPrompt({ ...options, ponytail: "off" })).toBe(buildSystemPrompt(options));
+			for (const level of ["lite", "full", "ultra"] as const) {
+				const prompt = buildSystemPrompt({ ...options, ponytail: level });
+				expect(prompt).toContain(`Ponytail (${level})`);
+				expect(prompt).toContain(PONYTAIL_LEVEL_RULES[level]);
+				expect(estimateTokens(prompt) - estimateTokens(buildSystemPrompt(options))).toBeLessThan(300);
+			}
+		}
 	});
 
 	it("names the OS and the working directory", () => {

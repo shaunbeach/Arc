@@ -5,7 +5,7 @@ A terminal coding assistant for local models served by llama.cpp. It starts `lla
 Arc is a modified version of [pi](https://github.com/earendil-works/pi), the terminal coding agent by Mario Zechner and contributors. It keeps pi's agent loop, tools, and terminal UI library, and drops the cloud providers, logins, extensions, and telemetry. See [Origin and license](#origin-and-license).
 
 - **Local models.** Models, ports, and llama-server arguments come from `models.yml`; the model runs on llama-server. The only other network requests come from the web tools, which `/web off` turns off.
-- **Small prompt.** The system prompt and tool definitions take under 1,000 tokens (about 100 more with `/rag on`) and stay byte-identical until you switch mode, `/web`, or `/rag`, so llama.cpp reuses its KV cache.
+- **Small prompt.** The system prompt and tool definitions take under 1,000 tokens (about 100 more with `/rag on`, about 200 with `/ponytail`) and stay byte-identical until you switch mode, `/web`, `/rag`, or `/ponytail`, so llama.cpp reuses its KV cache.
 - **Small process.** One Node process (about 60 MB resident) running a single 590 KB file. llama-server runs only while Arc does.
 - **Three ways to work.** Agent mode changes code, plan mode researches and plans without changing files, chat mode just talks. Thinking and instruct sampling switch independently.
 - **Built for long runs in small windows.** Trimming keeps a record of what it removes, so a model with a 16k window does not lose track of the files it wrote. See [Context window](#context-window).
@@ -118,6 +118,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
 | `/rag [on\|off]` | Let the model search your offline knowledge base. Without an argument, toggles. See [Knowledge base](#knowledge-base). |
+| `/ponytail [off\|lite\|full\|ultra]` | Steer the model to the smallest code that works. Without an argument, pick a level. See [Ponytail](#ponytail). |
 | `/compact [threshold]` | Ask the model which old tool results it still needs, and cut the rest. See [Context window](#context-window). |
 | `/serve [name]` | Host a model for other machines. See [Hosting](#hosting). |
 | `/disconnect` | Stop llama-server and unload the model without exiting. |
@@ -140,9 +141,9 @@ You can keep typing while the model works. Each message you send is queued, and 
 - While a model loads or `/compact` runs, they wait and go out when it is done.
 - If you press `esc` to abort, they come back into the editor instead of being sent.
 
-Commands such as `/web` or `/rag` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
+Commands such as `/web`, `/rag`, or `/ponytail` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
 
-The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, and what the model is doing. Sessions are stored in `~/.arc/sessions/` (set `ARC_DIR` to move them), and llama-server output goes to `~/.arc/logs/llama-server.log`.
+The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`, `[rag]`, the ponytail level (`[P:Lite]`, `[P:Full]`, `[P:Ultra]`), and what the model is doing. Sessions are stored in `~/.arc/sessions/` (set `ARC_DIR` to move them), and llama-server output goes to `~/.arc/logs/llama-server.log`.
 
 ## Modes
 
@@ -152,7 +153,7 @@ The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`,
 | plan | read, web_search, web_fetch | research the project and write a plan, without changing files |
 | chat | web_search, web_fetch | talk, look things up |
 
-Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`. The mode and the `/web` and `/rag` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on and the knowledge base off.
+Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`. The mode and the `/web`, `/rag`, and `/ponytail` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on, the knowledge base off, and ponytail off.
 
 ## Web tools
 
@@ -178,6 +179,18 @@ rag:
 - **Searching** returns five results with short snippets, about 1,200 tokens. It combines kiwix's full-text ranking with title matches, so "deepest point of the atlantic ocean" puts *Atlantic Ocean* first.
 - **Reading** an article returns only the parts that match the question: the opening paragraphs, then the best-matching sections, up to a fifth of the room in the context window (about 7,000 characters for a 20k window), without links, citation marks, info boxes, or reference lists. A whole Wikipedia article can hold 40,000 tokens; the result names the sections it left out, so the model can ask for one.
 - **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when Arc exits. Its output goes to `~/.arc/logs/kiwix-serve.log`.
+
+## Ponytail
+
+`/ponytail` adds rules from [ponytail](https://github.com/DietrichGebert/ponytail) to the system prompt: read the code first, then reach for what already exists (the codebase, the standard library, the platform, installed dependencies) before writing new code, and never cut validation, error handling, security, or accessibility. It is off by default. `/ponytail` opens a picker; `/ponytail lite`, `full`, `ultra`, or `off` sets the level directly.
+
+| Level | What the model does |
+|-------|---------------------|
+| `lite` | Builds what you asked, and names the lazier alternative in one line. |
+| `full` | Stdlib and native features first, shortest diff, shortest explanation. |
+| `ultra` | Deletes before adding, ships the one-liner, and challenges the rest of the request. |
+
+It costs about 200 tokens per request while it is on, nothing while it is off. The level applies from the next message and is saved with the session.
 
 ## Hosting
 
@@ -225,6 +238,7 @@ packages/arc          the app
   src/work-log.ts      the work log sent with trimmed tasks
   src/jev/             /compact: asks the model which tool results are still needed
   src/prompt.ts        system prompt
+  src/ponytail.ts      /ponytail rules
   src/session.ts       JSONL sessions
   src/tui/             terminal UI
 packages/tui           pi-tui, trimmed to the main-screen renderer, editor, markdown, and select list
@@ -245,6 +259,7 @@ Arc began as a fork of [earendil-works/pi](https://github.com/earendil-works/pi)
 - **Adapted from pi:** the agent loop and its event stream, tool-argument validation, streaming JSON parsing, the read, edit, write, and bash tools (including edit's fuzzy matching and output truncation), and pi-tui, pi's terminal UI library, trimmed to what Arc uses (`packages/tui`).
 - **Written for Arc:** the llama.cpp client (based on pi's OpenAI-compatible client, rebuilt on plain `fetch`), llama-server management and hosting, the models.yml loader, sampling presets, context trimming and the work log, modes, the web tools, the memory guard, sessions, the system prompt, and the interactive app.
 - **Adapted from fast-jev-compaction:** `/compact`'s questions and decisions follow [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (MIT), answered by the local model instead of the hosted Jev service.
+- **Adapted from ponytail:** `/ponytail`'s rules are condensed from [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) (MIT).
 - **Removed:** cloud providers and OAuth, the model catalog, extensions and package management, remote sessions, summary-based compaction, telemetry, and pi's other packages.
 
 Arc is not affiliated with or endorsed by the pi project. Both are released under the MIT License, and [LICENSE](LICENSE) keeps pi's copyright notice alongside Arc's.

@@ -120,6 +120,17 @@ describe("SessionFile", () => {
 		expect(loadSession(file.path).settings?.rag).toBeUndefined();
 	});
 
+	it("records the ponytail level and reads a missing value as off", () => {
+		const file = SessionFile.create(appDir(), "/work/project", settings);
+		file.appendMessage(user("hi"));
+		expect(loadSession(file.path).settings?.ponytail).toBeUndefined();
+
+		file.updateSettings({ ...settings, ponytail: "ultra" });
+		expect(loadSession(file.path).settings).toEqual({ ...settings, ponytail: "ultra" });
+		file.updateSettings(settings);
+		expect(loadSession(file.path).settings?.ponytail).toBeUndefined();
+	});
+
 	it("resumes appending to an existing file and records a different model", () => {
 		const file = SessionFile.create(appDir(), "/work/project", settings);
 		file.appendMessage(user("hi"));

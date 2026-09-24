@@ -1,6 +1,7 @@
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { LiteModel } from "../config/models.ts";
 import { isSamplingMode, SAMPLING_MODES, type SamplingMode } from "../config/sampling.ts";
+import { PONYTAIL_LEVELS } from "../ponytail.ts";
 
 export type CommandName =
 	| "agent"
@@ -8,6 +9,7 @@ export type CommandName =
 	| "chat"
 	| "web"
 	| "rag"
+	| "ponytail"
 	| "model"
 	| "mode"
 	| "serve"
@@ -24,6 +26,11 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
 	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
 	{ name: "rag", description: "Let the model search the offline knowledge base", argumentHint: "[on|off]" },
+	{
+		name: "ponytail",
+		description: "Steer the model to the smallest code that works",
+		argumentHint: "[off|lite|full|ultra]",
+	},
 	{ name: "model", description: "Switch model (restarts llama-server)", argumentHint: "[name]" },
 	{ name: "mode", description: "Switch between thinking and instruct sampling", argumentHint: "[thinking|instruct]" },
 	{ name: "serve", description: "Serve a model as a remote host with live server logs", argumentHint: "[name]" },
@@ -93,6 +100,7 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		mode: complete(SAMPLING_MODES),
 		web: complete(["on", "off"]),
 		rag: complete(["on", "off"]),
+		ponytail: complete(PONYTAIL_LEVELS),
 	};
 	return COMMANDS.map((command) => ({
 		name: command.name,

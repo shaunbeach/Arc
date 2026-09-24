@@ -1,6 +1,7 @@
 import type { AgentTool } from "./agent/types.ts";
 import { estimateTokens } from "./context.ts";
 import { toChatTools } from "./llm/llama-client.ts";
+import { type PonytailLevel, ponytailSection } from "./ponytail.ts";
 
 export type InteractionMode = "agent" | "plan" | "chat";
 export const INTERACTION_MODES: readonly InteractionMode[] = ["agent", "plan", "chat"] as const;
@@ -30,6 +31,8 @@ export interface SystemPromptOptions {
 	web?: boolean;
 	/** Whether the model has kb_search (`/rag on`). Default: no. */
 	rag?: boolean;
+	/** The `/ponytail` level. Default: off. */
+	ponytail?: PonytailLevel;
 }
 
 /** The line that tells the model about kb_search, or nothing while `/rag` is off. */
@@ -120,13 +123,14 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
 	const mode = options.interactionMode ?? "agent";
 	const web = options.web ?? true;
 	const rag = options.rag ?? false;
+	const ponytail = ponytailSection(options.ponytail ?? "off");
 	switch (mode) {
 		case "plan":
-			return buildPlanPrompt(options.cwd, platform, web, rag);
+			return buildPlanPrompt(options.cwd, platform, web, rag) + ponytail;
 		case "chat":
-			return buildChatPrompt(options.cwd, platform, web, rag);
+			return buildChatPrompt(options.cwd, platform, web, rag) + ponytail;
 		default:
-			return buildAgentPrompt(options.cwd, platform, web, rag);
+			return buildAgentPrompt(options.cwd, platform, web, rag) + ponytail;
 	}
 }
 

@@ -3,6 +3,7 @@ import { resolvePreset, type SamplingMode } from "../config/sampling.ts";
 import { ContextWindow, estimateMessageTokens } from "../context.ts";
 import { type CompactResult, compact, compactHeuristic, type JevAsker, LocalLlamaJevAsker } from "../jev/index.ts";
 import type { AssistantMessage, Message, UserMessage } from "../llm/types.ts";
+import type { PonytailLevel } from "../ponytail.ts";
 import {
 	buildSystemPrompt,
 	estimateFixedPromptTokens,
@@ -28,6 +29,8 @@ export interface AgentOptions {
 	web?: boolean;
 	/** Whether the model has kb_search. Default: no. */
 	rag?: boolean;
+	/** The `/ponytail` level. Default: off. */
+	ponytail?: PonytailLevel;
 	cwd?: string;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -52,6 +55,7 @@ export class Agent {
 	interactionMode: InteractionMode;
 	web: boolean;
 	rag: boolean;
+	ponytail: PonytailLevel;
 	cwd: string;
 	systemPrompt: string;
 	tools: AgentTool[];
@@ -69,6 +73,7 @@ export class Agent {
 		this.interactionMode = options.interactionMode ?? "agent";
 		this.web = options.web ?? true;
 		this.rag = options.rag ?? false;
+		this.ponytail = options.ponytail ?? "off";
 		this.cwd = options.cwd ?? process.cwd();
 		this.contextWindow = new ContextWindow({ cwd: this.cwd });
 		this.systemPrompt = options.systemPrompt ?? buildSystemPrompt(this.promptOptions());
@@ -203,8 +208,20 @@ export class Agent {
 		this.rebuildSystemPrompt();
 	}
 
+	/** Add the ponytail rules to the prompt at a level, or take them out (`/ponytail`). */
+	setPonytail(level: PonytailLevel): void {
+		this.ponytail = level;
+		this.rebuildSystemPrompt();
+	}
+
 	private promptOptions(): SystemPromptOptions {
-		return { cwd: this.cwd, interactionMode: this.interactionMode, web: this.web, rag: this.rag };
+		return {
+			cwd: this.cwd,
+			interactionMode: this.interactionMode,
+			web: this.web,
+			rag: this.rag,
+			ponytail: this.ponytail,
+		};
 	}
 
 	/** Update working directory and regenerate system prompt. */
