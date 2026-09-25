@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -43,6 +43,7 @@ import {
 	listSessions,
 	loadSession,
 	matchSession,
+	readSessionEntries,
 	recordSession,
 	SessionFile,
 	type SessionSettings,
@@ -53,6 +54,7 @@ import { asCritic } from "../supervisor/critic.ts";
 import { isClean, isGitRepo } from "../supervisor/git.ts";
 import { RepeatGuard } from "../supervisor/guard.ts";
 import { PlanError } from "../supervisor/plan.ts";
+import { buildReport, formatReportMarkdown, formatReportText } from "../supervisor/report.ts";
 import {
 	type ActorOutcome,
 	type ActorResult,
@@ -925,6 +927,10 @@ class InteractiveApp {
 			this.notice(style.gray(this.describeSupervisor()));
 			return;
 		}
+		if (arg === "report") {
+			await this.supervisorReport();
+			return;
+		}
 		if (!this.requireIdle()) return;
 		if (arg === "resume") {
 			const state = this.supervisor?.state;
@@ -993,7 +999,8 @@ class InteractiveApp {
 		this.supervisorRun = controller;
 		this.updateFooter();
 		try {
-			await supervisor.run(controller.signal, begin);
+			const final = await supervisor.run(controller.signal, begin);
+			if (final.status === "done") await this.supervisorReport();
 		} finally {
 			this.supervisorRun = undefined;
 			this.criticOverride = undefined;
@@ -1007,6 +1014,40 @@ class InteractiveApp {
 			const next = this.pending.join("\n\n");
 			this.pending = [];
 			void this.runPrompt(next);
+		}
+	}
+
+	/**
+	 * `/supervise report`, and the end of a run: time and tokens per phase, from the session file. Shown in the
+	 * transcript and saved as supervisor-report.md in the project, to keep and compare runs.
+	 */
+	private async supervisorReport(): Promise<void> {
+		const path = this.session?.path;
+		if (!path || !existsSync(path)) {
+			this.notice(style.yellow("The report is built from the session file, and this session is not saved."));
+			return;
+		}
+		try {
+			const entries = readSessionEntries(path);
+			const plan = this.supervisor?.state.plan;
+			const titles = new Map<number, string>();
+			if (plan) {
+				try {
+					for (const phase of await readPlan(plan)) titles.set(phase.number, phase.title);
+				} catch {
+					// A moved or broken plan only costs the titles.
+				}
+			}
+			const report = buildReport(entries, titles);
+			if (!report) {
+				this.notice(style.gray("No supervisor run in this session yet."));
+				return;
+			}
+			const file = join(this.options.cwd, "supervisor-report.md");
+			writeFileSync(file, formatReportMarkdown(report));
+			this.notice(style.gray(`${formatReportText(report)}\nSaved to ${relative(this.options.cwd, file)}.`));
+		} catch (error) {
+			this.notice(style.red(`Report: ${errorText(error)}`));
 		}
 	}
 

@@ -125,7 +125,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
 | `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
-| `/supervise [plan.md\|resume\|stop]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is. See [Supervisor](#supervisor). |
+| `/supervise [plan.md\|resume\|stop\|report]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase. See [Supervisor](#supervisor). |
 | `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
 | `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
 | `/quit` | Exit. |
@@ -228,6 +228,8 @@ For each phase:
 6. After `maxRetries` fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries back.
 
 The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit. The loop's place is saved with the session: after esc, `/supervise stop`, or a restart, `/supervise resume` continues, and a new `/supervise` on the same plan starts at the first phase without a passed commit. Messages you type while the loop runs go to the actor's next turn. The footer shows `[phase 2]`, with failed attempts and `halted` or `stopped` when they apply.
+
+`/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out.
 
 Every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
 

@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LiteModel } from "../src/config/models.ts";
 import { ContextWindow } from "../src/context.ts";
 import type { Message } from "../src/llm/types.ts";
+import type { SessionEntry } from "../src/session.ts";
+import { buildReport, formatReportMarkdown, formatReportText } from "../src/supervisor/report.ts";
 import {
 	type ActorResult,
 	Supervisor,
@@ -273,5 +275,100 @@ describe("ContextWindow.startAt", () => {
 		expect(window.select(messages, 10_000, 0).messages).toEqual([user("phase 2")]);
 		window.startAt(1);
 		expect(window.select(messages, 10_000, 0).messages).toEqual([user("phase 2")]);
+	});
+});
+
+describe("supervisor report", () => {
+	const s = 1000;
+	const state = (phase: number, status: SupervisorState["status"], stage: "actor" | "audit", critic?: number[]) => ({
+		plan: "/p/implementation.md",
+		status,
+		phase,
+		stage,
+		failures: 0,
+		...(critic ? { criticUsage: { requests: critic[0], input: critic[1], cached: 0, output: critic[2] } } : {}),
+	});
+	const save = (timestamp: number, value: SupervisorState): SessionEntry => ({
+		type: "supervisor",
+		state: value,
+		timestamp,
+	});
+	const reply = (timestamp: number, promptTokens: number, cachedTokens: number, completionTokens: number) =>
+		({
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [],
+				model: "m",
+				usage: { promptTokens, cachedTokens, completionTokens },
+				stopReason: "stop",
+				timestamp,
+			},
+		}) as SessionEntry;
+	const entries: SessionEntry[] = [
+		save(0, state(1, "running", "actor")),
+		reply(30 * s, 100, 0, 10),
+		save(60 * s, state(1, "running", "audit")),
+		save(70 * s, state(1, "running", "actor", [1, 1000, 5])),
+		save(130 * s, state(1, "running", "audit", [1, 1000, 5])),
+		save(140 * s, state(2, "running", "actor", [2, 2500, 10])),
+		save(200 * s, state(2, "halted", "actor", [2, 2500, 10])),
+		{ type: "message", message: { role: "user", content: "hint", timestamp: 250 * s } },
+		reply(310 * s, 200, 50, 20),
+		save(500 * s, state(2, "running", "actor", [2, 2500, 10])),
+		save(560 * s, state(2, "running", "audit", [2, 2500, 10])),
+		save(600 * s, state(2, "done", "audit", [3, 3000, 12])),
+	];
+
+	it("splits each phase into actor, review, manual work, and waiting, with its tries and tokens", () => {
+		const report = buildReport(entries, new Map([[1, "Types"]]));
+		expect(report?.status).toBe("done");
+		expect(report?.phases).toEqual([
+			{
+				phase: 1,
+				title: "Types",
+				startedAt: 0,
+				endedAt: 140 * s,
+				actorMs: 120 * s,
+				reviewMs: 20 * s,
+				manualMs: 0,
+				waitingMs: 0,
+				audits: 2,
+				result: "passed",
+				actor: { requests: 1, input: 100, cached: 0, output: 10 },
+				critic: { requests: 2, input: 2500, cached: 0, output: 10 },
+			},
+			{
+				phase: 2,
+				title: "Phase 2",
+				startedAt: 140 * s,
+				endedAt: 600 * s,
+				actorMs: 120 * s,
+				reviewMs: 40 * s,
+				manualMs: 60 * s,
+				waitingMs: 240 * s,
+				audits: 1,
+				result: "passed",
+				actor: { requests: 1, input: 200, cached: 50, output: 20 },
+				critic: { requests: 1, input: 500, cached: 0, output: 2 },
+			},
+		]);
+	});
+
+	it("formats a table for the terminal and a Markdown file", () => {
+		const report = buildReport(entries, new Map([[1, "Types"]]));
+		if (!report) throw new Error("no report");
+		const text = formatReportText(report);
+		expect(text).toMatch(/^Supervisor report: implementation\.md \(done\)/);
+		expect(text).toMatch(/\nTotal\s+6m\s+5m\*\s+1m\s+3\s+300\s+250\s+30\s+3,000\n/);
+		expect(text).toContain("* includes 1m of work on messages typed while the loop was halted.");
+		expect(text).toContain("Waiting for you, not counted above: 4m.");
+		const markdown = formatReportMarkdown(report);
+		expect(markdown).toContain("| 1 Types | passed | 2m | 2m | 20s | 2 | 100 | 100 | 10 | 2,500 | 10 |");
+		expect(markdown).toContain("- Critic tokens: 3,000 in, 12 out, 3 reviews");
+	});
+
+	it("reports nothing for a session without a supervisor run", () => {
+		expect(buildReport([], new Map())).toBeUndefined();
 	});
 });

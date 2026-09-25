@@ -209,24 +209,31 @@ export function recordSession(agent: Agent, currentFile: () => SessionFile | und
 	});
 }
 
-export function loadSession(path: string): LoadedSession {
+/** Every entry of a session file, in order. A crash mid-write can leave the last line incomplete; it is skipped. */
+export function readSessionEntries(path: string): SessionEntry[] {
 	const lines = readFileSync(path, "utf8").split("\n");
+	const entries: SessionEntry[] = [];
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		if (!line.trim()) continue;
+		try {
+			entries.push(JSON.parse(line) as SessionEntry);
+		} catch {
+			// Damage anywhere but the final line is an error.
+			if (index === lines.length - 1) break;
+			throw new Error(`${path}: line ${index + 1} is not valid JSON.`);
+		}
+	}
+	return entries;
+}
+
+export function loadSession(path: string): LoadedSession {
 	let header: SessionHeader | undefined;
 	let settings: SessionSettings | undefined;
 	let name: string | undefined;
 	let supervisor: SupervisorState | undefined;
 	const messages: Message[] = [];
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		if (!line.trim()) continue;
-		let entry: SessionEntry;
-		try {
-			entry = JSON.parse(line) as SessionEntry;
-		} catch {
-			// A crash mid-write can leave the final line incomplete; damage anywhere else is an error.
-			if (index === lines.length - 1) break;
-			throw new Error(`${path}: line ${index + 1} is not valid JSON.`);
-		}
+	for (const entry of readSessionEntries(path)) {
 		if (!header) {
 			if (entry.type !== "session") throw new Error(`${path} is not an Arc session file.`);
 			header = entry;
