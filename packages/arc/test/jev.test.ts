@@ -129,6 +129,38 @@ describe("LocalLlamaJevAsker", () => {
 		expect(bodies[0].chat_template_kwargs).toEqual({ enable_thinking: false });
 	});
 
+	it("names the model in the request and in the json_object retry", async () => {
+		// TinyTitan answers 400 to a request without `model`; llama-server ignores the field.
+		const bodies: Record<string, unknown>[] = [];
+		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+			bodies.push(JSON.parse(String(init.body)));
+			if (bodies.length === 1) return new Response("grammar rejected", { status: 400 });
+			const content = JSON.stringify({ answers: { call_t1: { noul: 1 } } });
+			return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+		});
+		const asker = new LocalLlamaJevAsker({ llamaUrl: "http://127.0.0.1:9", model: "ornith-1.5-35b-a3b_4-Bit" });
+		const questions: JevQuestions = { call_t1: { type: "noul", instructions: "keep?" } };
+		await asker.ask({ context: "", goal: "g", history: [] }, questions);
+		expect(bodies.map((body) => body.model)).toEqual(["ornith-1.5-35b-a3b_4-Bit", "ornith-1.5-35b-a3b_4-Bit"]);
+		expect(bodies[0].grammar).toBeDefined();
+		expect(bodies[1].response_format).toEqual({ type: "json_object" });
+	});
+
+	it("leaves model out when none is given", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+			bodies.push(JSON.parse(String(init.body)));
+			const content = JSON.stringify({ answers: { call_t1: { noul: 1 } } });
+			return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+		});
+		const questions: JevQuestions = { call_t1: { type: "noul", instructions: "keep?" } };
+		await new LocalLlamaJevAsker({ llamaUrl: "http://127.0.0.1:9" }).ask(
+			{ context: "", goal: "g", history: [] },
+			questions,
+		);
+		expect("model" in bodies[0]).toBe(false);
+	});
+
 	it("reserves reply tokens for the answers only", async () => {
 		const bodies: { max_tokens: number }[] = [];
 		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {

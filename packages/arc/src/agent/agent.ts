@@ -318,7 +318,7 @@ export class Agent {
 	private getJevAsker(model: LiteModel): LocalLlamaJevAsker | undefined {
 		if (!model.baseUrl) return undefined;
 		const llamaUrl = model.baseUrl.replace(/\/v1\/?$/, "");
-		return new LocalLlamaJevAsker({ llamaUrl });
+		return new LocalLlamaJevAsker({ llamaUrl, model: model.servedModel ?? model.name });
 	}
 
 	private async emit(event: AgentEvent): Promise<void> {

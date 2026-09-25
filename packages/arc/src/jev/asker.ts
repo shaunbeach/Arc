@@ -85,13 +85,17 @@ Output a score (1 = keep, 0 = drop) for every question key inside the JSON "answ
 export interface LocalLlamaJevAskerOptions {
 	llamaUrl?: string;
 	timeoutMs?: number;
+	/** The request's `model`, as chat requests send it. llama-server ignores it; TinyTitan rejects a request without it. */
+	model?: string;
 }
 
 export class LocalLlamaJevAsker implements JevAsker {
 	private readonly llamaUrl: string;
 	private readonly timeoutMs: number;
+	private readonly model: string | undefined;
 
 	constructor(options: LocalLlamaJevAskerOptions = {}) {
+		this.model = options.model;
 		this.llamaUrl = (options.llamaUrl ?? process.env.LLAMA_ENDPOINT ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
 		// A request near half the context window can take a local model a minute or more to read; esc cancels sooner.
 		this.timeoutMs = options.timeoutMs ?? 180_000;
@@ -116,6 +120,7 @@ export class LocalLlamaJevAsker implements JevAsker {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
+					...(this.model ? { model: this.model } : {}),
 					messages: [
 						{ role: "system", content: system },
 						{ role: "user", content: user },
@@ -140,6 +145,7 @@ export class LocalLlamaJevAsker implements JevAsker {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
+						...(this.model ? { model: this.model } : {}),
 						messages: [
 							{ role: "system", content: system },
 							{ role: "user", content: user },
