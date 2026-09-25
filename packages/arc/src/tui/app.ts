@@ -62,6 +62,7 @@ import {
 	type SupervisorState,
 	startState,
 } from "../supervisor/supervisor.ts";
+import { killLeftoverProcesses, setLeftoverLimit } from "../tools/child-process.ts";
 import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
 import { formatUsage, tallyUsage } from "../usage.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
@@ -866,10 +867,13 @@ class InteractiveApp {
 				const timer = setTimeout(() => stop(`the turn ran past ${minutes} minutes`), minutes * 60_000);
 				// Messages typed while the checks or the critic ran go with this turn.
 				const typed = this.pending.splice(0);
+				// One app or server left running at a time: a second one stops the first instead of piling up.
+				setLeftoverLimit(1);
 				try {
 					const outcome = await this.runPrompt([text, ...typed].join("\n\n"), false);
 					return stuck && !signal.aborted ? { stuck } : outcome;
 				} finally {
+					setLeftoverLimit(undefined);
 					clearTimeout(timer);
 					unsubscribe();
 				}
@@ -888,6 +892,7 @@ class InteractiveApp {
 				}
 				return critic;
 			},
+			stopLeftovers: () => killLeftoverProcesses(),
 			save: (state) => {
 				this.session?.setSupervisor(state);
 				this.updateFooter();

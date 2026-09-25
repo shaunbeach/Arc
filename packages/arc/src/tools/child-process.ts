@@ -6,6 +6,13 @@ const SHELL = existsSync("/bin/bash") ? "/bin/bash" : "sh";
 const EXIT_STDIO_GRACE_MS = 100;
 
 const runningProcessGroups = new Set<number>();
+/**
+ * Process groups of finished commands that left something running, such as `npm run dev &`, oldest first. Nothing
+ * else would ever stop them: each attempt at starting an app would leave another window open.
+ */
+let leftoverGroups: number[] = [];
+/** Most leftovers kept; older ones are stopped when a newer command leaves one. Undefined: no limit. */
+let leftoverLimit: number | undefined;
 
 export interface ShellRunOptions {
 	signal?: AbortSignal;
@@ -31,10 +38,52 @@ function killProcessGroup(pid: number): void {
 	}
 }
 
-/** Kill every command still running, for process exit. Detached process groups would otherwise outlive the harness. */
+function groupAlive(pid: number): boolean {
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (error) {
+		// EPERM: a member exists but belongs to someone else; it is still alive.
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Kill every command still running, and what finished ones left behind, for process exit. */
 export function killRunningCommands(): void {
 	for (const pid of runningProcessGroups) killProcessGroup(pid);
 	runningProcessGroups.clear();
+	killLeftoverProcesses();
+}
+
+/** Stop everything finished commands left running. Returns how many process groups were still alive. */
+export function killLeftoverProcesses(): number {
+	let killed = 0;
+	for (const pid of leftoverGroups) {
+		if (!groupAlive(pid)) continue;
+		killProcessGroup(pid);
+		killed++;
+	}
+	leftoverGroups = [];
+	return killed;
+}
+
+/**
+ * Keep at most `limit` leftovers from now on (undefined: no limit). One lets a model start a server in one command
+ * and use it in the next, while a second server stops the first instead of piling up next to it.
+ */
+export function setLeftoverLimit(limit: number | undefined): void {
+	leftoverLimit = limit;
+}
+
+function recordLeftover(pid: number): void {
+	leftoverGroups = leftoverGroups.filter(groupAlive);
+	if (!groupAlive(pid)) return;
+	leftoverGroups.push(pid);
+	if (leftoverLimit === undefined) return;
+	while (leftoverGroups.length > leftoverLimit) {
+		const oldest = leftoverGroups.shift();
+		if (oldest !== undefined) killProcessGroup(oldest);
+	}
 }
 
 /**
@@ -72,7 +121,10 @@ export async function runShellCommand(command: string, cwd: string, options: She
 	} finally {
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", kill);
-		if (pid !== undefined) runningProcessGroups.delete(pid);
+		if (pid !== undefined) {
+			runningProcessGroups.delete(pid);
+			recordLeftover(pid);
+		}
 	}
 }
 

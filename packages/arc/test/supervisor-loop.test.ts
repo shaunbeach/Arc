@@ -50,6 +50,7 @@ interface Harness {
 	plan: string;
 	sent: { text: string; contextStart: number }[];
 	critics: number;
+	cleanups: number;
 	notified: string[];
 	saved: SupervisorState[];
 	cleanup: () => void;
@@ -77,6 +78,7 @@ function harness(planText: string, act: (text: string, turn: number, dir: string
 		plan,
 		sent: [],
 		critics: 0,
+		cleanups: 0,
 		notified: [],
 		saved: [],
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -92,6 +94,10 @@ function harness(planText: string, act: (text: string, turn: number, dir: string
 			loadCritic: async () => {
 				h.critics++;
 				return critic;
+			},
+			stopLeftovers: () => {
+				h.cleanups++;
+				return 0;
 			},
 			save: (state) => h.saved.push(state),
 			notice: () => {},
@@ -132,6 +138,8 @@ describe("Supervisor", () => {
 			const final = await new Supervisor(h.host, state).run(new AbortController().signal);
 
 			expect(final.status).toBe("done");
+			// Before and after the checks of each phase.
+			expect(h.cleanups).toBe(4);
 			expect(h.sent.map((turn) => turn.contextStart)).toEqual([0, 4]);
 			expect(h.sent[0].text).toMatch(
 				/^\[Supervisor\] Phase 1 of 2: A\n\nCreate a\.txt\.\n\nWhen you finish, these checks run:\n- test -f a\.txt/,

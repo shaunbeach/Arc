@@ -53,6 +53,12 @@ export interface SupervisorHost {
 	transcriptLength(): number;
 	/** Run the actor on `text` until it ends its turn, sending only the transcript from `contextStart` on. */
 	runActor(text: string, contextStart: number, signal: AbortSignal): Promise<ActorResult>;
+	/**
+	 * Stop whatever the actor's or the checks' commands left running, such as a dev server or an app window. A stale
+	 * one would hold its port, and a startup check could then reach it instead of the app it just started.
+	 * Returns how many were stopped.
+	 */
+	stopLeftovers(): number;
 	/** Stop the actor's server and start the critic's; resolves with the critic as launched. */
 	loadCritic(signal: AbortSignal): Promise<LiteModel>;
 	save(state: SupervisorState): void;
@@ -187,11 +193,18 @@ export class Supervisor {
 					}
 				}
 
+				const stopped = host.stopLeftovers();
+				if (stopped > 0) {
+					host.notice(
+						`${label}: stopped ${stopped} process${stopped === 1 ? "" : "es"} the actor left running.`,
+						"info",
+					);
+				}
 				host.status(`${label}: running checks`);
 				const gate = await runChecks(phase.verify, host.cwd, {
 					signal,
 					onCheck: (command) => host.status(`${label}: ${command}`),
-				});
+				}).finally(() => host.stopLeftovers());
 				let verdict: Verdict;
 				if (!gate.passed) {
 					verdict = {

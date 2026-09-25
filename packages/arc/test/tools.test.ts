@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentTool, ToolResult } from "../src/agent/types.ts";
 import { validateToolArguments } from "../src/llm/validation.ts";
 import { createBashTool } from "../src/tools/bash.ts";
+import { killLeftoverProcesses, runShellCommand, setLeftoverLimit } from "../src/tools/child-process.ts";
 import { createEditTool } from "../src/tools/edit.ts";
 import type { CodingToolOptions, ToolLimits } from "../src/tools/options.ts";
 import { createReadTool } from "../src/tools/read.ts";
@@ -306,5 +307,51 @@ describe("paths pasted into the prompt", () => {
 
 		await run(createWriteTool(options), { path: "Desktop/new file.txt", content: "new\n" });
 		expect(readFileSync(join(options.cwd, "Desktop", "new file.txt"), "utf8")).toBe("new\n");
+	});
+});
+
+describe("leftover processes", () => {
+	/** Run a command that leaves a `sleep` running, and return that sleep's pid. */
+	async function leaveSleep(): Promise<number> {
+		let output = "";
+		await runShellCommand("sleep 30 > /dev/null 2>&1 & echo $!", tmpdir(), {
+			onData: (data) => {
+				output += data.toString();
+			},
+		});
+		return Number(output.trim());
+	}
+	const alive = (pid: number) => {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const gone = async (pid: number) => {
+		for (let i = 0; i < 50 && alive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+		return !alive(pid);
+	};
+
+	it("remembers what finished commands left running and stops it on request", async () => {
+		const pid = await leaveSleep();
+		expect(alive(pid)).toBe(true);
+		expect(killLeftoverProcesses()).toBe(1);
+		expect(await gone(pid)).toBe(true);
+		expect(killLeftoverProcesses()).toBe(0);
+	});
+
+	it("keeps at most the limit, stopping the oldest leftover first", async () => {
+		setLeftoverLimit(1);
+		try {
+			const first = await leaveSleep();
+			const second = await leaveSleep();
+			expect(await gone(first)).toBe(true);
+			expect(alive(second)).toBe(true);
+		} finally {
+			setLeftoverLimit(undefined);
+			killLeftoverProcesses();
+		}
 	});
 });

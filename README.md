@@ -206,7 +206,7 @@ supervisor:
   attemptMinutes: 90                 # longest one actor turn may run
 ```
 
-Each phase is a `## Phase N: title` section of the plan. Its checks go in a ```` ```verify ```` block, one shell command per line:
+Each phase is a `## Phase N: title` section of the plan; [docs/implementation-plan-template.md](docs/implementation-plan-template.md) is a template to give the model that writes it. Its checks go in a ```` ```verify ```` block, one shell command per line:
 
 ````md
 ## Phase 2: Settings window
