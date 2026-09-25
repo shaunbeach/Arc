@@ -5,6 +5,17 @@ import { addUsage, NO_USAGE, type TokenUsage } from "../usage.ts";
 import { askCritic, type Verdict } from "./critic.ts";
 import { checkPassed, formatChecks, type GateResult, runChecks } from "./gate.ts";
 import { commitPhase, diffBudgetChars, diffSince, filesFromPassedPhases, passedPhases, phaseStartRef } from "./git.ts";
+import {
+	type FrozenPlan,
+	findTampering,
+	freezePlan,
+	historyProblem,
+	type PassedPhase,
+	passedCommits,
+	planChanged,
+	readFrozenPlan,
+	restorePlan,
+} from "./integrity.ts";
 import { nextPhase, type Phase, parsePlan } from "./plan.ts";
 
 /** Files of earlier phases the brief names; more would crowd a small window. */
@@ -39,6 +50,10 @@ export interface SupervisorState {
 	stuck?: string;
 	/** What the critic's requests used. The actor's usage is in the transcript. */
 	criticUsage?: TokenUsage;
+	/** The plan as committed when the run started. The run reads its phases and checks from here, never the file. */
+	frozenPlan?: FrozenPlan;
+	/** Phases that passed, with their commits. Commit messages alone could be faked. */
+	passed?: PassedPhase[];
 }
 
 export type ActorOutcome = "done" | "aborted" | "error";
@@ -72,11 +87,17 @@ export async function readPlan(path: string): Promise<Phase[]> {
 	return parsePlan(await readFile(path, "utf8"));
 }
 
-/** State for a new run of `plan`: the first phase without a passed commit. Undefined when every phase has passed. */
+/**
+ * State for a new run of `plan`, frozen at HEAD: the first phase without a passed commit. Undefined when every phase
+ * has passed. Throws when the plan is not committed as it is on disk.
+ */
 export async function startState(plan: string, cwd: string): Promise<SupervisorState | undefined> {
-	const phase = nextPhase(await readPlan(plan), await passedPhases(cwd));
+	const frozenPlan = await freezePlan(cwd, plan);
+	const phases = parsePlan(await readFrozenPlan(cwd, frozenPlan));
+	const passed = (await passedCommits(cwd)).filter((done) => phases.some((phase) => phase.number === done.phase));
+	const phase = nextPhase(phases, new Set(passed.map((done) => done.phase)));
 	if (!phase) return undefined;
-	return { plan, status: "stopped", phase: phase.number, stage: "actor", failures: 0 };
+	return { plan, status: "stopped", phase: phase.number, stage: "actor", failures: 0, frozenPlan, passed };
 }
 
 /** The first message of a phase. It opens a fresh context, so it says everything the actor needs to start. */
@@ -151,15 +172,57 @@ export class Supervisor {
 		this.host.save(this.state);
 	}
 
+	/** The phases as the run sees them: from the frozen plan, or from the file for runs saved before freezing. */
+	private async readPhases(signal?: AbortSignal): Promise<Phase[]> {
+		const frozen = this.state.frozenPlan;
+		return frozen ? parsePlan(await readFrozenPlan(this.host.cwd, frozen, signal)) : readPlan(this.state.plan);
+	}
+
+	/** `/supervise reload`: adopt the plan as committed now, after a person changed it on purpose. */
+	async reload(): Promise<void> {
+		const frozenPlan = await freezePlan(this.host.cwd, this.state.plan);
+		parsePlan(await readFrozenPlan(this.host.cwd, frozenPlan));
+		this.update({ frozenPlan });
+	}
+
+	/** Ways the phase changed what judges it: the plan, what its checks run, or the record of passed phases. */
+	private async tampering(phase: Phase, signal: AbortSignal): Promise<string[]> {
+		const reasons: string[] = [];
+		const frozen = this.state.frozenPlan;
+		if (frozen && (await planChanged(this.host.cwd, frozen))) {
+			const backup = await restorePlan(this.host.cwd, frozen);
+			const kept = backup ? ` (the edited copy is at ${backup})` : "";
+			reasons.push(`The plan file ${frozen.path} was changed. It has been restored${kept}; never edit the plan.`);
+		}
+		if (this.state.startRef)
+			reasons.push(...(await findTampering(this.host.cwd, phase, this.state.startRef, signal)));
+		return reasons;
+	}
+
 	/** Run until the plan is done, a phase halts, or `signal` aborts. `audit` skips to the checks and critic. */
 	async run(signal: AbortSignal, begin?: "audit"): Promise<SupervisorState> {
 		const { host } = this;
+		// An edit made while the loop was not running is a person's: never overwrite it, and never follow it unasked.
+		const frozen = this.state.frozenPlan;
+		try {
+			if (frozen && this.state.status !== "running" && (await planChanged(host.cwd, frozen))) {
+				host.notice(
+					`${frozen.path} changed since this run started, and the run keeps the version it started with. To use your edit, commit it and run /supervise reload. To drop it: git checkout -- ${frozen.path}`,
+					"bad",
+				);
+				return this.state;
+			}
+		} catch (error) {
+			return this.halt(error instanceof Error ? error.message : String(error));
+		}
 		// A person looked at a halted phase before resuming it, so it gets its retries back.
 		const failures = this.state.status === "halted" ? 0 : this.state.failures;
 		this.update({ status: "running", failures, haltReason: undefined, ...(begin ? { stage: begin } : {}) });
 		try {
 			while (true) {
-				const phases = await readPlan(this.state.plan);
+				const problem = await historyProblem(host.cwd, this.state.passed ?? [], this.state.startRef, signal);
+				if (problem) return this.halt(problem);
+				const phases = await this.readPhases(signal);
 				const phase = phases.find((candidate) => candidate.number === this.state.phase);
 				if (!phase) throw new Error(`The plan no longer has a phase ${this.state.phase}.`);
 				const label = `Phase ${phase.number}/${phases.length}`;
@@ -200,13 +263,23 @@ export class Supervisor {
 						"info",
 					);
 				}
+				// Again here: the actor's turn may have rewritten history, and the last phase has no next loop.
+				const rewritten = await historyProblem(host.cwd, this.state.passed ?? [], this.state.startRef, signal);
+				if (rewritten) return this.halt(rewritten);
+				const tampering = await this.tampering(phase, signal);
 				host.status(`${label}: running checks`);
-				const gate = await runChecks(phase.verify, host.cwd, {
-					signal,
-					onCheck: (command) => host.status(`${label}: ${command}`),
-				}).finally(() => host.stopLeftovers());
+				const gate: GateResult =
+					tampering.length > 0
+						? { passed: true, checks: [], screenshots: [] }
+						: await runChecks(phase.verify, host.cwd, {
+								signal,
+								onCheck: (command) => host.status(`${label}: ${command}`),
+							}).finally(() => host.stopLeftovers());
 				let verdict: Verdict;
-				if (!gate.passed) {
+				if (tampering.length > 0) {
+					verdict = { pass: false, reasons: tampering };
+					host.notice(`${label}: ${tampering[0]} Skipping the checks and the critic.`, "bad");
+				} else if (!gate.passed) {
 					verdict = {
 						pass: false,
 						reasons: gate.checks.filter((check) => !checkPassed(check)).map(describeCheck),
@@ -242,11 +315,16 @@ export class Supervisor {
 				host.status(undefined);
 
 				if (verdict.pass) {
-					await commitPhase(host.cwd, phase.number, phase.title, signal);
+					const commit = await commitPhase(host.cwd, phase.number, phase.title, signal);
 					host.notice(`${label} passed and was committed.`, "good");
-					const next = nextPhase(phases, await passedPhases(host.cwd, signal));
+					// Runs saved before passed phases were recorded fall back to the commit messages.
+					const passed = [...(this.state.passed ?? []), { phase: phase.number, commit }];
+					const done = this.state.passed
+						? new Set(passed.map((entry) => entry.phase))
+						: await passedPhases(host.cwd, signal);
+					const next = nextPhase(phases, done);
 					if (!next) {
-						this.update({ status: "done", lastVerdict: verdict });
+						this.update({ status: "done", lastVerdict: verdict, passed });
 						host.notice("Supervisor: every phase passed.", "good");
 						return this.state;
 					}
@@ -257,6 +335,7 @@ export class Supervisor {
 						failures: 0,
 						stuck: undefined,
 						lastVerdict: verdict,
+						passed,
 						startRef: undefined,
 						phaseStart: undefined,
 					});

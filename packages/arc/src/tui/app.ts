@@ -932,6 +932,20 @@ class InteractiveApp {
 			return;
 		}
 		if (!this.requireIdle()) return;
+		if (arg === "reload") {
+			const supervisor = this.supervisor;
+			if (!supervisor) {
+				this.notice(style.yellow("Nothing to reload. Start with /supervise <plan.md>."));
+				return;
+			}
+			try {
+				await supervisor.reload();
+				this.notice(style.gray("The run now follows the plan as committed. /supervise resume continues."));
+			} catch (error) {
+				this.notice(style.red(error instanceof PlanError ? `Plan: ${error.message}` : errorText(error)));
+			}
+			return;
+		}
 		if (arg === "resume") {
 			const state = this.supervisor?.state;
 			if (!state) this.notice(style.yellow("Nothing to resume. Start with /supervise <plan.md>."));

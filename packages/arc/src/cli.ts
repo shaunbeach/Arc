@@ -52,7 +52,7 @@ Options:
       --verbose               Print every request body to stderr (print mode)
   -h, --help                  Show this help
 
-Interactive commands: /agent  /plan  /chat  /web [on|off]  /rag [on|off]  /ponytail [off|lite|full|ultra]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [number|name|id]  /name <text>  /supervise [plan.md|resume|stop|report]  /audit [critic]  /usage  /quit
+Interactive commands: /agent  /plan  /chat  /web [on|off]  /rag [on|off]  /ponytail [off|lite|full|ultra]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [number|name|id]  /name <text>  /supervise [plan.md|resume|stop|report|reload]  /audit [critic]  /usage  /quit
 `;
 
 function dim(text: string): string {

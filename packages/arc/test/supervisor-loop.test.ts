@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import type { LiteModel } from "../src/config/models.ts";
 import { ContextWindow } from "../src/context.ts";
 import type { Message } from "../src/llm/types.ts";
 import type { SessionEntry } from "../src/session.ts";
+import { checkedPaths, checkedScripts } from "../src/supervisor/integrity.ts";
 import { buildReport, formatReportMarkdown, formatReportText } from "../src/supervisor/report.ts";
 import {
 	type ActorResult,
@@ -54,6 +55,7 @@ interface Harness {
 	critics: number;
 	cleanups: number;
 	notified: string[];
+	notices: string[];
 	saved: SupervisorState[];
 	cleanup: () => void;
 }
@@ -62,7 +64,11 @@ interface Harness {
  * A temp git repo with `plan`, and a host whose actor runs `act` for each message: it may write files, and its
  * result is the turn's outcome.
  */
-function harness(planText: string, act: (text: string, turn: number, dir: string) => ActorResult | undefined): Harness {
+function harness(
+	planText: string,
+	act: (text: string, turn: number, dir: string) => ActorResult | undefined,
+	files: Record<string, string> = {},
+): Harness {
 	const dir = mkdtempSync(join(tmpdir(), "arc-loop-"));
 	const git = (...args: string[]) => execFileSync("git", args, { cwd: dir });
 	git("init", "-q");
@@ -71,7 +77,11 @@ function harness(planText: string, act: (text: string, turn: number, dir: string
 	git("config", "commit.gpgsign", "false");
 	const plan = join(dir, "implementation.md");
 	writeFileSync(plan, planText);
-	git("add", "implementation.md");
+	for (const [path, content] of Object.entries(files)) {
+		mkdirSync(join(dir, path, ".."), { recursive: true });
+		writeFileSync(join(dir, path), content);
+	}
+	git("add", ".");
 	git("commit", "-q", "-m", "plan");
 
 	let transcript = 0;
@@ -82,6 +92,7 @@ function harness(planText: string, act: (text: string, turn: number, dir: string
 		critics: 0,
 		cleanups: 0,
 		notified: [],
+		notices: [],
 		saved: [],
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
 		host: {
@@ -102,7 +113,7 @@ function harness(planText: string, act: (text: string, turn: number, dir: string
 				return 0;
 			},
 			save: (state) => h.saved.push(state),
-			notice: () => {},
+			notice: (text) => h.notices.push(text),
 			status: () => {},
 			notify: (text) => h.notified.push(text),
 		},
@@ -370,5 +381,214 @@ describe("supervisor report", () => {
 
 	it("reports nothing for a session without a supervisor run", () => {
 		expect(buildReport([], new Map())).toBeUndefined();
+	});
+});
+
+describe("tampering", () => {
+	const git = (dir: string, ...args: string[]) => execFileSync("git", args, { cwd: dir }).toString();
+	async function run(h: Harness): Promise<{ final: SupervisorState; supervisor: Supervisor }> {
+		const state = await startState(h.plan, h.dir);
+		if (!state) throw new Error("no phase");
+		const supervisor = new Supervisor(h.host, state);
+		return { final: await supervisor.run(new AbortController().signal), supervisor };
+	}
+	const CHECKED = "## Phase 1: A\nCreate a.txt.\n```verify\ntest -f a.txt\n```\n";
+
+	it("reads checks from the plan as committed, and restores a plan the actor edited", async () => {
+		const h = harness(CHECKED, (_text, turn, dir) => {
+			// First turn: delete the check instead of doing the work.
+			if (turn === 1) writeFileSync(join(dir, "implementation.md"), "## Phase 1: A\nCreate a.txt.\n");
+			else writeFileSync(join(dir, "a.txt"), "x");
+			return undefined;
+		});
+		try {
+			stubCritic(PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("done");
+			expect(h.sent[1].text).toContain("The plan file implementation.md was changed. It has been restored");
+			expect(readFileSync(h.plan, "utf8")).toBe(CHECKED);
+			expect(h.critics).toBe(1);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("fails a phase that changes a package script its checks run", async () => {
+		const h = harness(
+			"## Phase 1: A\nCreate a.txt.\n```verify\nnpm run check\n```\n",
+			(_text, turn, dir) => {
+				const pkg = (check: string) => JSON.stringify({ name: "t", scripts: { check } });
+				if (turn === 1) writeFileSync(join(dir, "package.json"), pkg("true"));
+				else {
+					writeFileSync(join(dir, "package.json"), pkg("test -f a.txt"));
+					writeFileSync(join(dir, "a.txt"), "x");
+				}
+				return undefined;
+			},
+			{ "package.json": JSON.stringify({ name: "t", scripts: { check: "test -f a.txt" } }) },
+		);
+		try {
+			stubCritic(PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("done");
+			expect(h.sent[1].text).toContain(
+				'The "check" script in package.json, which a check runs, changed from "test -f a.txt" to "true".',
+			);
+			expect(h.critics).toBe(1);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("lets a phase change a script its text names", async () => {
+		const h = harness(
+			'## Phase 1: A\nSet the script: "check": "test -f b.txt"\n```verify\nnpm run check\n```\n',
+			(_text, _turn, dir) => {
+				writeFileSync(
+					join(dir, "package.json"),
+					JSON.stringify({ name: "t", scripts: { check: "test -f b.txt" } }),
+				);
+				writeFileSync(join(dir, "b.txt"), "x");
+				return undefined;
+			},
+			{ "package.json": JSON.stringify({ name: "t", scripts: { check: "false" } }) },
+		);
+		try {
+			stubCritic(PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("done");
+			expect(h.sent).toHaveLength(1);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("fails a phase that changes a file its checks run", async () => {
+		const h = harness(
+			"## Phase 1: A\nCreate a.txt.\n```verify\nsh checks/verify.sh\n```\n",
+			(_text, turn, dir) => {
+				if (turn === 1) writeFileSync(join(dir, "checks/verify.sh"), "exit 0\n");
+				else {
+					writeFileSync(join(dir, "checks/verify.sh"), "test -f a.txt\n");
+					writeFileSync(join(dir, "a.txt"), "x");
+				}
+				return undefined;
+			},
+			{ "checks/verify.sh": "test -f a.txt\n" },
+		);
+		try {
+			stubCritic(PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("done");
+			expect(h.sent[1].text).toContain("checks/verify.sh, which a check uses, was changed.");
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("fails a phase that makes its own passed-phase commit, and never skips the phase it named", async () => {
+		const h = harness(TWO_PHASES, (_text, turn, dir) => {
+			if (turn === 1) {
+				writeFileSync(join(dir, "a.txt"), "x");
+				git(dir, "add", "a.txt");
+				git(dir, "commit", "-q", "-m", "arc: phase 2 passed: B");
+			} else if (turn === 2) {
+				git(dir, "reset", "-q", "--soft", "HEAD~1");
+			} else {
+				writeFileSync(join(dir, "b.txt"), "x");
+			}
+			return undefined;
+		});
+		try {
+			stubCritic(PASS, PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("done");
+			expect(h.sent[1].text).toContain('titled like a passed phase ("arc: phase 2 passed: B")');
+			expect(h.sent[2].text).toMatch(/^\[Supervisor\] Phase 2 of 2: B/);
+			expect(final.passed?.map((entry) => entry.phase)).toEqual([1, 2]);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("halts when the actor rewrites the history of a passed phase", async () => {
+		const h = harness(TWO_PHASES, (_text, turn, dir) => {
+			if (turn === 1) writeFileSync(join(dir, "a.txt"), "x");
+			else {
+				git(dir, "reset", "-q", "--hard", "HEAD~1");
+				writeFileSync(join(dir, "b.txt"), "x");
+			}
+			return undefined;
+		});
+		try {
+			stubCritic(PASS, PASS);
+			const { final } = await run(h);
+			expect(final.status).toBe("halted");
+			expect(final.haltReason).toMatch(
+				/^Git history was rewritten: phase 1's passed commit [0-9a-f]{8} is no longer part of it\.$/,
+			);
+			expect(h.critics).toBe(1);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("will not resume over a person's edit to the plan, and follows it after a commit and reload", async () => {
+		const h = harness(CHECKED, (_text, turn, dir) => {
+			if (turn === 1) return "aborted";
+			writeFileSync(join(dir, "b.txt"), "x");
+			return undefined;
+		});
+		try {
+			stubCritic(PASS);
+			const { supervisor } = await run(h);
+			expect(supervisor.state.status).toBe("stopped");
+			const edited = "## Phase 1: A\nCreate b.txt.\n```verify\ntest -f b.txt\n```\n";
+			writeFileSync(h.plan, edited);
+
+			const refused = await supervisor.run(new AbortController().signal);
+			expect(refused.status).toBe("stopped");
+			expect(h.sent).toHaveLength(1);
+			expect(h.notices.at(-1)).toContain("implementation.md changed since this run started");
+			expect(readFileSync(h.plan, "utf8")).toBe(edited);
+
+			await expect(supervisor.reload()).rejects.toThrow(/uncommitted changes/);
+			git(h.dir, "commit", "-q", "-am", "plan: b.txt");
+			await supervisor.reload();
+			expect((await supervisor.run(new AbortController().signal)).status).toBe("done");
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("refuses to start from a plan that is not committed as it is on disk", async () => {
+		const h = harness(CHECKED, () => undefined);
+		try {
+			writeFileSync(h.plan, `${CHECKED}\nMore.\n`);
+			await expect(startState(h.plan, h.dir)).rejects.toThrow(/uncommitted changes/);
+		} finally {
+			h.cleanup();
+		}
+	});
+});
+
+describe("check parsing for tamper detection", () => {
+	it("finds the scripts and files a check runs", () => {
+		const commands = [
+			"npm run typecheck",
+			"npm test && yarn lint && pnpm run build:web",
+			"npm install && npx tsc",
+			"sh checks/verify.sh && test -f out/main/index.js",
+			"! rg 'node:|fetch\\(' src/renderer src/preload",
+			'test "$(grep -c x src/shared/constants.ts)" = 1',
+		];
+		expect(checkedScripts(commands)).toEqual(["typecheck", "test", "lint", "build:web"]);
+		expect(checkedPaths(commands)).toEqual([
+			"checks/verify.sh",
+			"out/main/index.js",
+			"src/renderer",
+			"src/preload",
+			"src/shared/constants.ts",
+		]);
 	});
 });

@@ -125,7 +125,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
 | `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
-| `/supervise [plan.md\|resume\|stop\|report]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase. See [Supervisor](#supervisor). |
+| `/supervise [plan.md\|resume\|stop\|report\|reload]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase; `reload` adopts a plan you changed and committed. See [Supervisor](#supervisor). |
 | `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
 | `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
 | `/quit` | Exit. |
@@ -227,7 +227,15 @@ For each phase:
 5. A loop guard watches the actor. If it makes the same tool call 3 times among its last 5, or one turn runs past `attemptMinutes`, Arc ends the turn and checks the phase right away. On a fail, the actor is told why it was stopped.
 6. After `maxRetries` fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries back.
 
-The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit. The loop's place is saved with the session: after esc, `/supervise stop`, or a restart, `/supervise resume` continues, and a new `/supervise` on the same plan starts at the first phase without a passed commit. Messages you type while the loop runs go to the actor's next turn. The footer shows `[phase 2]`, with failed attempts and `halted` or `stopped` when they apply.
+The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit.
+
+The run cannot be talked into passing. It reads its phases and checks from the plan as committed when it started, not from the file, and a phase fails without running its checks if it:
+
+- edits the plan (the file is restored; the edited copy is kept in the temp folder),
+- changes a `package.json` script or a tracked file that its checks run, unless the phase's text names it (a script as `"name":`, a file by its path),
+- makes its own `arc: phase N passed` commit.
+
+Passed phases are recorded with their commits, and if git history is rewritten so one of them disappears, the loop halts. If you change the plan yourself while a run is stopped, `/supervise resume` refuses until you either drop the edit or commit it and run `/supervise reload`. The loop's place is saved with the session: after esc, `/supervise stop`, or a restart, `/supervise resume` continues, and a new `/supervise` on the same plan starts at the first phase without a passed commit. Messages you type while the loop runs go to the actor's next turn. The footer shows `[phase 2]`, with failed attempts and `halted` or `stopped` when they apply.
 
 `/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out.
 

@@ -53,7 +53,7 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	{
 		name: "supervise",
 		description: "Work through a phased plan: actor builds, checks and a critic judge each phase",
-		argumentHint: "[plan.md|resume|stop|report]",
+		argumentHint: "[plan.md|resume|stop|report|reload]",
 	},
 	{ name: "audit", description: "Check and judge the current supervised phase now", argumentHint: "[critic]" },
 	{ name: "usage", description: "Show the tokens this session used, in and out" },
@@ -111,7 +111,7 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		web: complete(["on", "off"]),
 		rag: complete(["on", "off"]),
 		ponytail: complete(PONYTAIL_LEVELS),
-		supervise: complete(["resume", "stop", "report"]),
+		supervise: complete(["resume", "stop", "report", "reload"]),
 		audit: complete(models.filter((model) => !model.discover).map((model) => model.name)),
 	};
 	return COMMANDS.map((command) => ({
