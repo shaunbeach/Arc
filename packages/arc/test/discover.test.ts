@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { LiteModel } from "../src/config/models.ts";
-import { fetchServerProps, modelNameFromPath, resolveDiscoveredModel } from "../src/llm/discover.ts";
+import {
+	DEFAULT_CONTEXT_WINDOW,
+	fetchServerProps,
+	modelNameFromPath,
+	resolveDiscoveredModel,
+} from "../src/llm/discover.ts";
 
 /** Shaped like llama-server b10809's /props, trimmed to the fields discovery reads. */
 const PROPS = {
@@ -67,6 +72,68 @@ describe("fetchServerProps", () => {
 		// A server with no usable window is no better than no answer.
 		const noCtx = { ...PROPS, default_generation_settings: { n_ctx: 0 } };
 		expect(await fetchServerProps("http://localhost:8081/v1", jsonFetch(noCtx))).toBeUndefined();
+	});
+});
+
+/** A server with no /props, shaped like TinyTitan's: 404 there, a model list at /v1/models. */
+function openAiFetch(ids: string[]): typeof fetch {
+	return (async (input: string | URL | Request) => {
+		const path = new URL(String(input)).pathname;
+		if (path === "/v1/models")
+			return Response.json({ object: "list", data: ids.map((id) => ({ id, object: "model" })) });
+		return Response.json({ error: { message: "route not found" } }, { status: 404 });
+	}) as typeof fetch;
+}
+
+describe("fetchServerProps without /props", () => {
+	it("takes the first model /v1/models lists, and leaves the window to models.yml", async () => {
+		const props = await fetchServerProps("http://localhost:8080/v1", openAiFetch(["ornith-1.5-35b-a3b_4-Bit"]));
+		expect(props).toEqual({
+			modelPath: "ornith-1.5-35b-a3b_4-Bit",
+			servedModel: "ornith-1.5-35b-a3b_4-Bit",
+			vision: false,
+			reasoning: false,
+			reasoningEffort: false,
+			tools: true,
+		});
+	});
+
+	it("gives up when /v1/models lists nothing", async () => {
+		expect(await fetchServerProps("http://localhost:8080/v1", openAiFetch([]))).toBeUndefined();
+	});
+
+	it("resolves the window and thinking switch from models.yml, and asks for the listed id", async () => {
+		const props = await fetchServerProps("http://localhost:8080/v1", openAiFetch(["ornith-1.5-35b-a3b_4-Bit"]));
+		if (!props) throw new Error("expected props");
+		const model = resolveDiscoveredModel(
+			{ ...PLACEHOLDER, configuredContextWindow: 65536, configuredReasoning: true },
+			props,
+		);
+		expect(model.servedModel).toBe("ornith-1.5-35b-a3b_4-Bit");
+		expect(model.displayName).toBe("ornith-1.5-35b-a3b_4-Bit");
+		expect(model.contextWindow).toBe(65536);
+		expect(model.maxTokens).toBe(8192);
+		expect(model.reasoning).toBe(true);
+	});
+
+	it("assumes a modest window and no thinking switch when models.yml says nothing", async () => {
+		const props = await fetchServerProps("http://localhost:8080/v1", openAiFetch(["m"]));
+		if (!props) throw new Error("expected props");
+		const model = resolveDiscoveredModel(PLACEHOLDER, props);
+		expect(model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
+		expect(model.reasoning).toBe(false);
+	});
+
+	it("ignores the models.yml fallbacks when llama-server reports its own", async () => {
+		const props = await fetchServerProps("http://localhost:8081/v1", jsonFetch(PROPS));
+		if (!props) throw new Error("expected props");
+		const model = resolveDiscoveredModel(
+			{ ...PLACEHOLDER, configuredContextWindow: 1024, configuredReasoning: false },
+			props,
+		);
+		expect(model.contextWindow).toBe(65536);
+		expect(model.reasoning).toBe(true);
+		expect(model.servedModel).toBeUndefined();
 	});
 });
 

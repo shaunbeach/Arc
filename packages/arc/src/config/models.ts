@@ -26,6 +26,15 @@ export interface LiteModel {
 	discover?: boolean;
 	/** `maxTokens` as written in models.yml, so discovery can tell an explicit value from the default. */
 	configuredMaxTokens?: number;
+	/** A discover entry's `contextWindow`: used when the server advertises none (anything but llama-server). */
+	configuredContextWindow?: number;
+	/** A discover entry's `reasoning`: used when the server reports no thinking switch (anything but llama-server). */
+	configuredReasoning?: boolean;
+	/**
+	 * The `model` a discovered server that is not llama-server must be asked for, from its `/v1/models`. Requests
+	 * send it instead of `name`.
+	 */
+	servedModel?: string;
 	/** llama-server's `build_info`, when a discovered server reported one. */
 	buildInfo?: string;
 	/** models.yml `id`: the GGUF path, relative to `modelDir` unless absolute. */
@@ -272,7 +281,9 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 		}
 
 		// `discover: true`: one placeholder standing for whatever the server at baseUrl is already running. Its
-		// fields are filled from /props on connect, so models.yml says nothing about the model itself.
+		// fields are filled from /props on connect, so models.yml says nothing about the model itself. A server
+		// without /props (TinyTitan, other OpenAI-compatible servers) names its model at /v1/models but not its
+		// window or thinking switch, so `contextWindow` and `reasoning` may be given for that case.
 		if (readBoolean(provider, "discover", at) === true) {
 			if (provider.models !== undefined) {
 				throw configError(`${at}.models`, "is not allowed with discover: true; the running server names the model");
@@ -294,6 +305,8 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 				contextWindow: 4096,
 				maxTokens: 1024,
 				configuredMaxTokens: readPositiveInt(provider, "maxTokens", at),
+				configuredContextWindow: readPositiveInt(provider, "contextWindow", at),
+				configuredReasoning: readBoolean(provider, "reasoning", at),
 				modelPath: "",
 				launchArgs: [],
 				llamaServer,

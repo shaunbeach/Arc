@@ -85,6 +85,23 @@ The GGUF name, the context window, whether it loaded a projector, and whether it
 
 `maxTokens` is the one thing `/props` does not advertise, being Arc's reply reserve rather than a server setting; left out it defaults to a quarter of the reported window, capped at 8192. Per-request variants are not discoverable either, so reasoning-effort levels still need one ordinary entry each.
 
+### Servers other than llama-server
+
+A server without `/props` -- [TinyTitan](https://github.com/Pummelchen/TinyTitan), or another OpenAI-compatible server -- still works with `discover: true`. Arc takes the first model its `/v1/models` lists and names that id in every request, since such servers route on the request's `model` field. They advertise no window or thinking switch, so give those in models.yml; left out, the window is 32768 and thinking is off:
+
+```yaml
+providers:
+  tinytitan:
+    baseUrl: http://localhost:8081/v1   # a port llama-server entries do not use
+    auth: none
+    discover: true
+    name: TinyTitan
+    contextWindow: 65536
+    reasoning: true
+```
+
+`/props` wins whenever it answers, so these two keys change nothing for llama-server.
+
 ## Sampling modes
 
 | Mode | temperature | top_p | top_k | min_p | presence_penalty | Thinking |

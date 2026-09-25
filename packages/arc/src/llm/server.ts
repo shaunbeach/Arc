@@ -52,6 +52,28 @@ export function getLocalIpAddress(): string {
 	return "127.0.0.1";
 }
 
+/** Ids from `/v1/models`, or undefined when it does not answer with a model list. */
+export async function fetchModelIds(
+	baseUrl: string,
+	fetchFn: typeof fetch = fetch,
+	signal?: AbortSignal,
+): Promise<string[] | undefined> {
+	try {
+		const response = await fetchFn(`${baseUrl.replace(/\/+$/, "")}/models`, { signal });
+		if (!response.ok) return undefined;
+		const body = (await response.json()) as { data?: unknown };
+		if (!Array.isArray(body.data)) return undefined;
+		const ids = body.data
+			.map((entry: unknown) =>
+				typeof entry === "object" && entry !== null ? (entry as { id?: unknown }).id : undefined,
+			)
+			.filter((id): id is string => typeof id === "string" && id !== "");
+		return ids.length > 0 ? ids : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Check whether any llama-server slot is actively processing a request. */
 export async function isServerBusy(
 	origin: string,
@@ -208,7 +230,7 @@ export class LlamaServerManager {
 		if (state !== "down") {
 			onStatus?.(`Found llama-server at ${origin}, checking its model`);
 			if (state === "loading") await this.waitUntilReady(origin, undefined, signal);
-			const servedPath = await this.servedModelPath(origin, signal);
+			const servedPath = await this.servedModelPath(origin, model, signal);
 			if (servedPath === undefined || !samePath(servedPath, model.modelPath)) {
 				throw new Error(
 					`llama-server at ${origin} is serving ${servedPath ?? "an unknown model"}, not ${model.name}. ` +
@@ -478,10 +500,23 @@ export class LlamaServerManager {
 		}
 	}
 
-	private async servedModelPath(origin: string, signal: AbortSignal | undefined): Promise<string | undefined> {
+	/**
+	 * llama-server's `-m`, from `/props`. A server without `/props` (TinyTitan, other OpenAI-compatible servers) can
+	 * only say which ids it lists, so for one of those this is `model.modelPath` when `/v1/models` lists it.
+	 */
+	private async servedModelPath(
+		origin: string,
+		model: LiteModel,
+		signal: AbortSignal | undefined,
+	): Promise<string | undefined> {
 		try {
 			const response = await this.fetchFn(`${origin}/props`, { signal });
-			if (!response.ok) return undefined;
+			if (!response.ok) {
+				await response.body?.cancel();
+				const ids = await fetchModelIds(model.baseUrl, this.fetchFn, signal);
+				if (ids?.includes(model.modelPath)) return model.modelPath;
+				return ids?.[0];
+			}
 			const props = (await response.json()) as { model_path?: unknown };
 			return typeof props.model_path === "string" ? props.model_path : undefined;
 		} catch {

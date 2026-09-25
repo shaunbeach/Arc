@@ -1751,7 +1751,7 @@ function isUnresolved(model: LiteModel): boolean {
  */
 function describeDiscovered(model: LiteModel, props: ServerProps, origin: string): string {
 	const facts = [`ctx ${formatTokens(model.contextWindow)}`, `reply ${formatTokens(model.maxTokens)}`];
-	if (props.reasoning) facts.push("thinking");
+	if (model.reasoning) facts.push("thinking");
 	if (props.vision) facts.push("vision");
 	if (props.reasoningEffort) facts.push("reasoning effort");
 	if (!props.tools) facts.push("no tool support");

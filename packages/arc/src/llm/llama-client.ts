@@ -190,7 +190,8 @@ export function toChatTools(tools: readonly Tool[]): Record<string, unknown>[] {
 /** The /v1/chat/completions request body. Sampling fields come last, so a preset's `extra` can override anything. */
 export function buildRequestBody(model: LiteModel, context: Context, preset: SamplingPreset): Record<string, unknown> {
 	const body: Record<string, unknown> = {
-		model: model.name,
+		// llama-server ignores this; other OpenAI-compatible servers route on it.
+		model: model.servedModel ?? model.name,
 		messages: convertMessages(model, context, preset),
 		stream: true,
 		stream_options: { include_usage: true },

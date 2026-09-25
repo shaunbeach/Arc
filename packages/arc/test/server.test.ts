@@ -254,6 +254,37 @@ describe("LlamaServerManager", () => {
 		expect(manager.ownsServer).toBe(false);
 	});
 
+	it("attaches a discovered model to a server without /props that lists it", async () => {
+		const listing = (id: string) =>
+			routes((path) =>
+				path === "/v1/models"
+					? Response.json({ data: [{ id }] })
+					: path === "/health"
+						? Response.json({ status: "ok" })
+						: new Response("{}", { status: 404 }),
+			);
+		const discovered: LiteModel = { ...model, discover: true, modelPath: "ornith-1.5-35b-a3b_4-Bit" };
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: listing("ornith-1.5-35b-a3b_4-Bit"),
+		});
+		await manager.ensure(discovered);
+		expect(manager.ownsServer).toBe(false);
+
+		// Something else took the port: it lists another model, so Arc refuses rather than talk to it.
+		const other = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: listing("qwen3.6-35b-a3b_4-Bit"),
+		});
+		await expect(other.ensure(discovered)).rejects.toThrow(/serving qwen3\.6-35b-a3b_4-Bit/);
+	});
+
 	it("refuses a running server that serves another model", async () => {
 		const manager = new LlamaServerManager({
 			logFile: logFile(),

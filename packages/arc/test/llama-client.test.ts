@@ -165,6 +165,11 @@ describe("convertMessages", () => {
 });
 
 describe("buildRequestBody", () => {
+	it("asks a discovered server that is not llama-server for the model it listed", () => {
+		const served = { ...model, servedModel: "ornith-1.5-35b-a3b_4-Bit" };
+		expect(buildRequestBody(served, context([user("hi")]), thinking).model).toBe("ornith-1.5-35b-a3b_4-Bit");
+	});
+
 	it("combines messages, tools, limits, and sampling fields", () => {
 		const tools = [{ name: "read", description: "Read a file", parameters: Type.Object({ path: Type.String() }) }];
 		const body = JSON.parse(JSON.stringify(buildRequestBody(model, { ...context([user("hi")]), tools }, thinking)));

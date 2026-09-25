@@ -118,6 +118,19 @@ describe("parseModelsConfig", () => {
 		expect(model?.configuredMaxTokens).toBe(4096);
 	});
 
+	it("carries contextWindow and reasoning for a discover server without /props", () => {
+		const text = withProvider(`  tinytitan:
+    baseUrl: http://localhost:8080/v1
+    auth: none
+    discover: true
+    contextWindow: 65536
+    reasoning: true
+`);
+		const model = parse(text).models.at(-1);
+		expect(model?.configuredContextWindow).toBe(65536);
+		expect(model?.configuredReasoning).toBe(true);
+	});
+
 	it("rejects a discover provider that also lists models", () => {
 		const text = withProvider(`  mac:
     baseUrl: http://localhost:8081/v1
