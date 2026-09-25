@@ -19,6 +19,8 @@ export interface ChatRequestOptions {
 	signal?: AbortSignal;
 	/** Injectable for tests. */
 	fetch?: typeof fetch;
+	/** Clock in milliseconds, for measuring throughput when the server reports none. Injectable for tests. */
+	now?: () => number;
 }
 
 type ChatContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
@@ -259,10 +261,16 @@ class ChunkAccumulator {
 	private thinking: ThinkingContent | undefined;
 	private readonly toolCallsByIndex = new Map<number, ToolCall>();
 	private readonly argumentJson = new Map<ToolCall, string>();
+	private readonly now: () => number;
+	private readonly sentAt: number;
+	private firstTokenAt: number | undefined;
+	private lastTokenAt: number | undefined;
 
-	constructor(output: AssistantMessage, stream: AssistantMessageEventStream) {
+	constructor(output: AssistantMessage, stream: AssistantMessageEventStream, now: () => number, sentAt: number) {
 		this.output = output;
 		this.stream = stream;
+		this.now = now;
+		this.sentAt = sentAt;
 	}
 
 	accept(chunk: ChatChunk): void {
@@ -273,6 +281,11 @@ class ChunkAccumulator {
 		const choice = chunk.choices?.[0];
 		if (!choice) return;
 		const delta = choice.delta;
+		if (delta?.reasoning_content || delta?.content || delta?.tool_calls?.length) {
+			const at = this.now();
+			this.firstTokenAt ??= at;
+			this.lastTokenAt = at;
+		}
 
 		if (delta?.reasoning_content) {
 			if (!this.thinking) {
@@ -334,6 +347,7 @@ class ChunkAccumulator {
 
 	/** Emit the `*_end` events and settle the stop reason. */
 	finish(): void {
+		this.measureTimings();
 		const content = this.output.content;
 		for (let contentIndex = 0; contentIndex < content.length; contentIndex++) {
 			const block = content[contentIndex];
@@ -377,6 +391,23 @@ class ChunkAccumulator {
 		totals.promptTokens = Math.max(totals.promptTokens, usage.prompt_tokens ?? 0);
 		totals.completionTokens = usage.completion_tokens ?? totals.completionTokens;
 		totals.cachedTokens = Math.max(totals.cachedTokens, usage.prompt_tokens_details?.cached_tokens ?? 0);
+	}
+
+	/**
+	 * Throughput for a server that sends no `timings` (TinyTitan and other OpenAI-compatible servers), measured here:
+	 * decode from the first streamed token to the last, prefill from the request to the first token. The first
+	 * token's own time belongs to prefill, so decode counts the tokens after it.
+	 */
+	private measureTimings(): void {
+		if (this.output.timings || this.firstTokenAt === undefined || this.lastTokenAt === undefined) return;
+		const { promptTokens, cachedTokens, completionTokens } = this.output.usage;
+		const decodeMs = this.lastTokenAt - this.firstTokenAt;
+		const prefillMs = this.firstTokenAt - this.sentAt;
+		if (completionTokens < 2 || decodeMs <= 0) return;
+		this.output.timings = {
+			promptPerSecond: prefillMs > 0 ? ((promptTokens - cachedTokens) * 1000) / prefillMs : 0,
+			predictedPerSecond: ((completionTokens - 1) * 1000) / decodeMs,
+		};
 	}
 
 	private applyTimings(timings: NonNullable<ChatChunk["timings"]>): void {
@@ -436,6 +467,8 @@ export function streamChat(
 
 	const run = async () => {
 		try {
+			const now = options.now ?? performance.now.bind(performance);
+			const sentAt = now();
 			const headers: Record<string, string> = { "content-type": "application/json" };
 			if (model.apiKey) headers.authorization = `Bearer ${model.apiKey}`;
 			const response = await (options.fetch ?? fetch)(`${model.baseUrl}/chat/completions`, {
@@ -448,7 +481,7 @@ export function streamChat(
 			if (!response.body) throw new Error("llama-server returned an empty response body");
 
 			stream.push({ type: "start", partial: output });
-			const accumulator = new ChunkAccumulator(output, stream);
+			const accumulator = new ChunkAccumulator(output, stream, now, sentAt);
 			for await (const data of readSseData(response.body)) {
 				if (data === "[DONE]") break;
 				accumulator.accept(JSON.parse(data) as ChatChunk);

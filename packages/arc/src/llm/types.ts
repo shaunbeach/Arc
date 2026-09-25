@@ -33,7 +33,7 @@ export interface Usage {
 	completionTokens: number;
 }
 
-/** Throughput from llama.cpp's `timings` object. */
+/** Throughput from llama.cpp's `timings` object, or measured by Arc for a server that sends none. */
 export interface Timings {
 	promptPerSecond: number;
 	predictedPerSecond: number;

@@ -294,6 +294,44 @@ describe("streamChat", () => {
 		expect(message.content[0]).toMatchObject({ type: "toolCall", id: expect.stringMatching(/^call_\w+$/) });
 	});
 
+	it("measures throughput itself when the server sends no timings", async () => {
+		// TinyTitan's shape: token counts in the final usage chunk, no llama.cpp timings object.
+		const { fetch } = fakeFetch(
+			sse([
+				{ choices: [{ delta: { reasoning_content: "a" } }] },
+				{ choices: [{ delta: { reasoning_content: "b" } }] },
+				{ choices: [{ delta: { content: "c" } }] },
+				{ choices: [{ delta: { content: "d" }, finish_reason: "stop" }] },
+				{ choices: [], usage: { prompt_tokens: 50, completion_tokens: 4 } },
+			]),
+		);
+		// Sent at 0, first token at 1000 ms, then one every 100 ms.
+		const clock = [0, 1000, 1100, 1200, 1300];
+		const now = () => clock.shift() ?? 1300;
+		const message = await streamChat(model, context([user("hi")]), { preset: thinking, fetch, now }).result();
+		// 3 tokens after the first, in 300 ms; 50 prompt tokens before the first token, in 1 s.
+		expect(message.timings?.predictedPerSecond).toBeCloseTo(10);
+		expect(message.timings?.promptPerSecond).toBeCloseTo(50);
+	});
+
+	it("keeps llama.cpp's own timings over a measured estimate", async () => {
+		const { fetch } = fakeFetch(
+			sse([
+				{ choices: [{ delta: { content: "a" } }] },
+				{ choices: [{ delta: { content: "b" }, finish_reason: "stop" }] },
+				{
+					choices: [],
+					usage: { prompt_tokens: 10, completion_tokens: 2 },
+					timings: { prompt_n: 10, prompt_per_second: 400, predicted_per_second: 33 },
+				},
+			]),
+		);
+		const clock = [0, 1000, 5000];
+		const now = () => clock.shift() ?? 5000;
+		const message = await streamChat(model, context([user("hi")]), { preset: instruct, fetch, now }).result();
+		expect(message.timings).toEqual({ promptPerSecond: 400, predictedPerSecond: 33 });
+	});
+
 	it("reports the error message from an HTTP error body", async () => {
 		const { fetch } = fakeFetch(
 			JSON.stringify({ error: { code: 400, message: "the request exceeds the context size" } }),
