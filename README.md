@@ -11,6 +11,8 @@ Arc is a modified version of [pi](https://github.com/earendil-works/pi), the ter
 - **Built for long runs in small windows.** Trimming keeps a record of what it removes, so a model with a 16k window does not lose track of the files it wrote. See [Context window](#context-window).
 - **Terminal friendly.** Renders on the main screen, so tmux and terminal scrollback keep working. Sessions are saved as append-only JSONL.
 
+**New to Arc? Start with [QUICKSTART.md](QUICKSTART.md)**: step-by-step setup on a Mac, with a first model.
+
 ## Requirements
 
 - Node.js 22.19 or later
