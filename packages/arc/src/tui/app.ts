@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { totalmem } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -51,13 +52,15 @@ import {
 	sessionLabel,
 } from "../session.ts";
 import { asCritic } from "../supervisor/critic.ts";
-import { isClean, isGitRepo } from "../supervisor/git.ts";
+import { type CommitStats, commitStats, isClean, isGitRepo } from "../supervisor/git.ts";
 import { RepeatGuard } from "../supervisor/guard.ts";
+import { formatLint, lintPlan } from "../supervisor/lint.ts";
 import { PlanError } from "../supervisor/plan.ts";
 import { buildReport, formatReportMarkdown, formatReportText } from "../supervisor/report.ts";
 import {
 	type ActorOutcome,
 	type ActorResult,
+	type RunInfo,
 	readPlan,
 	Supervisor,
 	type SupervisorHost,
@@ -497,11 +500,13 @@ class InteractiveApp {
 		const controller = new AbortController();
 		this.serverStart = controller;
 		this.setAiStatus("working");
+		const started = Date.now();
 		try {
 			await this.options.manager.ensure(model, {
 				signal: controller.signal,
 				onStatus: (message) => this.setStatus(message),
 			});
+			this.recordLoad(model, Date.now() - started);
 			return true;
 		} catch (error) {
 			this.notice(
@@ -572,6 +577,12 @@ class InteractiveApp {
 				break;
 			case "context_trimmed":
 				this.notice(style.gray(`[${describeTrim(event)}]`));
+				this.session?.addEvent({
+					kind: "trim",
+					droppedMessages: event.droppedMessages,
+					compactedSteps: event.compactedSteps,
+					estimatedTokens: event.estimatedTokens,
+				});
 				break;
 			default:
 				return;
@@ -887,14 +898,20 @@ class InteractiveApp {
 				const critic = asCritic(found);
 				await this.serverTask;
 				this.setAiStatus("working");
+				const started = Date.now();
 				try {
 					await this.options.manager.ensure(critic, { signal, onStatus: (message) => this.setStatus(message) });
+					this.recordLoad(critic, Date.now() - started);
 				} finally {
 					this.setAiStatus("idle");
 				}
 				return critic;
 			},
-			stopLeftovers: () => killLeftoverProcesses(),
+			stopLeftovers: () => {
+				const count = killLeftoverProcesses();
+				if (count > 0) this.session?.addEvent({ kind: "leftovers", count });
+				return count;
+			},
 			save: (state) => {
 				this.session?.setSupervisor(state);
 				this.updateFooter();
@@ -929,6 +946,15 @@ class InteractiveApp {
 		}
 		if (arg === "report") {
 			await this.supervisorReport();
+			return;
+		}
+		if (arg === "check" || arg.startsWith("check ")) {
+			const plan = arg.slice(5).trim() || this.supervisor?.state.plan;
+			if (!plan) {
+				this.notice(style.yellow("Use /supervise check <plan.md>."));
+				return;
+			}
+			this.checkPlan(resolve(this.options.cwd, plan));
 			return;
 		}
 		if (!this.requireIdle()) return;
@@ -977,9 +1003,12 @@ class InteractiveApp {
 				return refuse("Commit or stash your changes first, or they would land in the first phase's commit.");
 			}
 			await readPlan(plan);
+			// Advice only: the run starts either way.
+			const lint = lintPlan(readFileSync(plan, "utf8"));
+			if (lint.findings.length > 0) this.notice(style.yellow(formatLint(lint)));
 			const state = await startState(plan, cwd);
 			if (!state) return refuse("Every phase of this plan already has a passed commit.");
-			this.supervisor = new Supervisor(this.supervisorHost(), state);
+			this.supervisor = new Supervisor(this.supervisorHost(), { ...state, run: await this.runInfo(config.critic) });
 		} catch (error) {
 			this.notice(style.red(error instanceof PlanError ? `Plan: ${error.message}` : errorText(error)));
 			return;
@@ -1012,10 +1041,21 @@ class InteractiveApp {
 		const controller = new AbortController();
 		this.supervisorRun = controller;
 		this.updateFooter();
+		// Record new highs in swap use while the loop runs: memory is what a 16 GB Mac runs short of.
+		let peak = 0;
+		const sampleSwap = async () => {
+			const usage = await readSwapUsage();
+			if (!usage || usage.usedBytes < peak + 100 * 1024 ** 2) return;
+			peak = usage.usedBytes;
+			this.session?.addEvent({ kind: "swap", usedBytes: peak });
+		};
+		void sampleSwap();
+		const swapTimer = setInterval(() => void sampleSwap(), 60_000);
 		try {
 			const final = await supervisor.run(controller.signal, begin);
 			if (final.status === "done") await this.supervisorReport();
 		} finally {
+			clearInterval(swapTimer);
 			this.supervisorRun = undefined;
 			this.criticOverride = undefined;
 			this.setStatus(undefined);
@@ -1052,7 +1092,12 @@ class InteractiveApp {
 					// A moved or broken plan only costs the titles.
 				}
 			}
-			const report = buildReport(entries, titles);
+			const stats = new Map<number, CommitStats>();
+			for (const { phase, commit } of this.supervisor?.state.passed ?? []) {
+				const changed = await commitStats(this.options.cwd, commit);
+				if (changed) stats.set(phase, changed);
+			}
+			const report = buildReport(entries, titles, { stats });
 			if (!report) {
 				this.notice(style.gray("No supervisor run in this session yet."));
 				return;
@@ -1063,6 +1108,46 @@ class InteractiveApp {
 		} catch (error) {
 			this.notice(style.red(`Report: ${errorText(error)}`));
 		}
+	}
+
+	/** `/supervise check <plan>`: what in a plan is likely to cost a run time or give a wrong verdict. */
+	private checkPlan(plan: string): void {
+		try {
+			const lint = lintPlan(readFileSync(plan, "utf8"));
+			this.notice((lint.findings.length > 0 ? style.yellow : style.gray)(formatLint(lint)));
+		} catch (error) {
+			this.notice(style.red(errorText(error)));
+		}
+	}
+
+	/** A start that reused a running server takes milliseconds; one that loaded a model is worth recording. */
+	private recordLoad(model: LiteModel, ms: number): void {
+		if (ms >= 2000) this.session?.addEvent({ kind: "model-load", model: model.name, ms });
+	}
+
+	/** What a new `/supervise` run runs on, for comparing reports later. */
+	private async runInfo(critic: string): Promise<RunInfo> {
+		const actor = this.agent.model;
+		const commit = process.env.ARC_COMMIT;
+		let llamaServer: string | undefined;
+		if (actor) {
+			llamaServer = await new Promise<string | undefined>((done) => {
+				execFile(actor.llamaServer, ["--version"], { timeout: 5000 }, (_error, stdout, stderr) => {
+					const line = `${stdout}${stderr}`.split("\n").find((text) => /version/i.test(text));
+					done(line?.trim());
+				});
+			});
+		}
+		return {
+			actor: actor ? modelLabel(actor) : "none",
+			critic,
+			mode: this.agent.mode,
+			ponytail: this.agent.ponytail,
+			arc: `${this.options.version ?? "0.0.1"}${commit ? ` (${commit})` : " (source)"}`,
+			...(llamaServer ? { llamaServer } : {}),
+			memoryGB: Math.round(totalmem() / 1024 ** 3),
+			platform: `${process.platform} ${process.arch}`,
+		};
 	}
 
 	/** `/usage`: the tokens this session's replies used, and the critic's while supervising. */

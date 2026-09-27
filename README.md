@@ -142,7 +142,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
 | `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
-| `/supervise [plan.md\|resume\|stop\|report\|reload]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase; `reload` adopts a plan you changed and committed. See [Supervisor](#supervisor). |
+| `/supervise [plan.md\|resume\|stop\|report\|reload\|check plan.md]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase; `reload` adopts a plan you changed and committed; `check` looks a plan over before a run. See [Supervisor](#supervisor). |
 | `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
 | `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
 | `/quit` | Exit. |
@@ -223,7 +223,7 @@ supervisor:
   attemptMinutes: 90                 # longest one actor turn may run
 ```
 
-Each phase is a `## Phase N: title` section of the plan; [docs/implementation-plan-template.md](docs/implementation-plan-template.md) is a template to give the model that writes it. Its checks go in a ```` ```verify ```` block, one shell command per line:
+Each phase is a `## Phase N: title` section of the plan. [docs/implementation-plan-template.md](docs/implementation-plan-template.md) is a template to give the model that writes it, [docs/spec-template.md](docs/spec-template.md) one for the spec it is written from, and [docs/verify-presets.md](docs/verify-presets.md) has check lines for common stacks. `/supervise check implementation.md` points out what in a plan is likely to cost time or give a wrong verdict, and every new run shows the same. Its checks go in a ```` ```verify ```` block, one shell command per line:
 
 ````md
 ## Phase 2: Settings window
@@ -254,7 +254,9 @@ The run cannot be talked into passing. It reads its phases and checks from the p
 
 Passed phases are recorded with their commits, and if git history is rewritten so one of them disappears, the loop halts. If you change the plan yourself while a run is stopped, `/supervise resume` refuses until you either drop the edit or commit it and run `/supervise reload`. The loop's place is saved with the session: after esc, `/supervise stop`, or a restart, `/supervise resume` continues, and a new `/supervise` on the same plan starts at the first phase without a passed commit. Messages you type while the loop runs go to the actor's next turn. The footer shows `[phase 2]`, with failed attempts and `halted` or `stopped` when they apply.
 
-`/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out.
+If the project has an `AGENTS.md`, every phase brief includes it (up to about 3,000 characters): the place for rules and decisions that hold in every phase. [docs/conventions-template.md](docs/conventions-template.md) is a starting point.
+
+`/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out. The saved file also has what the run ran on (models, settings, Arc and llama.cpp versions, memory), each phase's files and lines changed, tool calls and failures, trims, loop-guard stops, your hints, the actor's reading and writing time, every failed try with its reasons, model load times, and peak swap.
 
 Every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
 

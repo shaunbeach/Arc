@@ -195,3 +195,27 @@ export async function filesFromPassedPhases(cwd: string, signal?: AbortSignal): 
 	if (result.code !== 0) return [];
 	return [...new Set(result.stdout.split("\n").filter(Boolean))];
 }
+
+export interface CommitStats {
+	files: number;
+	added: number;
+	removed: number;
+}
+
+/**
+ * Files and lines a commit changed, from `git show --numstat`. Binary files count as files without lines; lock files
+ * are left out, since an install adds thousands of generated lines.
+ */
+export async function commitStats(cwd: string, commit: string, signal?: AbortSignal): Promise<CommitStats | undefined> {
+	const result = await git(cwd, ["show", "--numstat", "--format=", commit], signal);
+	if (result.code !== 0) return undefined;
+	const stats: CommitStats = { files: 0, added: 0, removed: 0 };
+	for (const line of result.stdout.split("\n")) {
+		const [added, removed, path] = line.split("\t");
+		if (path === undefined || isLockFile(path)) continue;
+		stats.files++;
+		stats.added += Number(added) || 0;
+		stats.removed += Number(removed) || 0;
+	}
+	return stats;
+}

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
 import type { LiteModel } from "../config/models.ts";
 import { addUsage, NO_USAGE, type TokenUsage } from "../usage.ts";
 import { askCritic, type Verdict } from "./critic.ts";
@@ -20,6 +20,8 @@ import { nextPhase, type Phase, parsePlan } from "./plan.ts";
 
 /** Files of earlier phases the brief names; more would crowd a small window. */
 const EARLIER_FILES_SHOWN = 30;
+/** Most of a project's AGENTS.md each phase brief carries: it is sent again with every phase. */
+const CONVENTIONS_CHARS = 3000;
 
 /**
  * `running`: the loop is working. `stopped`: esc or an abort ended it. `halted`: a phase failed `maxRetries` times, or
@@ -54,6 +56,22 @@ export interface SupervisorState {
 	frozenPlan?: FrozenPlan;
 	/** Phases that passed, with their commits. Commit messages alone could be faked. */
 	passed?: PassedPhase[];
+	/** What the run ran on, saved when it started, so reports of different runs can be compared. */
+	run?: RunInfo;
+}
+
+export interface RunInfo {
+	actor: string;
+	critic: string;
+	/** Sampling mode and `/ponytail` level of the actor. */
+	mode: string;
+	ponytail: string;
+	/** Arc's version, with the commit it was built from when known. */
+	arc: string;
+	/** `llama-server --version`, first line. */
+	llamaServer?: string;
+	memoryGB: number;
+	platform: string;
 }
 
 export type ActorOutcome = "done" | "aborted" | "error";
@@ -106,8 +124,15 @@ export function kickoffMessage(
 	phases: readonly Phase[],
 	plan: string,
 	earlierFiles: readonly string[],
+	conventions?: string,
 ): string {
 	const lines = [`[Supervisor] Phase ${phase.number} of ${phases.length}: ${phase.title}`, "", phase.body];
+	if (conventions?.trim()) {
+		const text = conventions.trim();
+		const cut =
+			text.length > CONVENTIONS_CHARS ? `${text.slice(0, CONVENTIONS_CHARS)}\n[... the rest of AGENTS.md]` : text;
+		lines.push("", "Project conventions (AGENTS.md):", cut);
+	}
 	if (phase.verify.length > 0) {
 		lines.push(
 			"",
@@ -234,7 +259,13 @@ export class Supervisor {
 						this.update({
 							startRef: await phaseStartRef(host.cwd, signal),
 							phaseStart: host.transcriptLength(),
-							message: kickoffMessage(phase, phases, plan, earlier),
+							message: kickoffMessage(
+								phase,
+								phases,
+								plan,
+								earlier,
+								await readFile(join(host.cwd, "AGENTS.md"), "utf8").catch(() => undefined),
+							),
 						});
 						host.notice(`Supervisor: ${label}, ${phase.title}.`, "info");
 					}

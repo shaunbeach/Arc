@@ -88,7 +88,7 @@ export function parseVerdict(raw: string): Verdict | undefined {
 
 const SYSTEM = `You are a strict reviewer. A developer has finished one phase of an implementation plan. Decide whether that phase is complete and correct.
 
-Pass only if every requirement of this phase is met by the changes and nothing they touch is broken. Do not fail the phase for work that belongs to later phases, for style, or for choices the requirements leave open. The checks listed have already passed.
+Pass only if every requirement of this phase is met by the changes and nothing they touch is broken. Do not fail the phase for work that belongs to later phases, for style, or for choices the requirements leave open. The checks listed have already passed. If the requirements include "Done when" criteria, check each one against the changes.
 
 On a fail, give at most ${MAX_REASONS} reasons. Each names the file and says what is wrong or missing, as an instruction the developer can act on.
 

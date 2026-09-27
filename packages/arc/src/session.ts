@@ -64,7 +64,19 @@ export type SessionEntry =
 	/** From `/name`; the latest one names the session. */
 	| { type: "name"; name: string; timestamp: number }
 	/** The `/supervise` loop after each step; the latest one is where a resume starts. */
-	| { type: "supervisor"; state: SupervisorState; timestamp: number };
+	| { type: "supervisor"; state: SupervisorState; timestamp: number }
+	/** Something worth knowing about a run that no message records, for `/supervise report`. */
+	| { type: "event"; event: SessionEvent; timestamp: number };
+
+export type SessionEvent =
+	/** Automatic trimming changed what requests carry, so the next one re-read its prompt. */
+	| { kind: "trim"; droppedMessages: number; compactedSteps: number; estimatedTokens: number }
+	/** A llama-server start, in ms from asking to ready. */
+	| { kind: "model-load"; model: string; ms: number }
+	/** Processes the actor's or the checks' commands left running, stopped by the supervisor. */
+	| { kind: "leftovers"; count: number }
+	/** Swap in use reached a new high during a run. */
+	| { kind: "swap"; usedBytes: number };
 
 export interface LoadedSession {
 	path: string;
@@ -189,6 +201,11 @@ export class SessionFile {
 	setName(name: string): void {
 		if (this.created) this.write({ type: "name", name, timestamp: Date.now() });
 		else this.pendingName = name;
+	}
+
+	/** Records an event for `/supervise report`. Before the first message there is no file, and nothing to report. */
+	addEvent(event: SessionEvent): void {
+		if (this.created) this.write({ type: "event", event, timestamp: Date.now() });
 	}
 
 	/** Records the supervisor's state, so `/supervise resume` works after a restart too. */

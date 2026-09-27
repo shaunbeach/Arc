@@ -1,7 +1,8 @@
 import { basename } from "node:path";
 import type { SessionEntry } from "../session.ts";
 import { addUsage, NO_USAGE, type TokenUsage } from "../usage.ts";
-import type { SupervisorState } from "./supervisor.ts";
+import type { CommitStats } from "./git.ts";
+import type { RunInfo, SupervisorState } from "./supervisor.ts";
 
 export interface PhaseReport {
 	phase: number;
@@ -21,6 +22,23 @@ export interface PhaseReport {
 	result: "passed" | "running" | "halted" | "stopped";
 	actor: TokenUsage;
 	critic: TokenUsage;
+	/** Every verdict, in order: failed tries with their reasons, then the pass. */
+	verdicts: { pass: boolean; reasons: string[] }[];
+	/** Turns the loop guard ended. */
+	guardTrips: number;
+	toolCalls: number;
+	failedTools: number;
+	/** Messages a person typed during the phase. */
+	hints: number;
+	/** Automatic trims, each followed by a re-read of the prompt. */
+	trims: number;
+	/** Processes the actor left running, stopped before the checks. */
+	leftovers: number;
+	/** The actor reading its prompt and writing its replies, from llama-server's speeds. */
+	readingMs: number;
+	writingMs: number;
+	/** What the phase's commit changed. */
+	changes?: CommitStats;
 }
 
 export interface RunReport {
@@ -29,6 +47,15 @@ export interface RunReport {
 	startedAt: number;
 	endedAt: number;
 	status: SupervisorState["status"];
+	run?: RunInfo;
+	modelLoads: { model: string; ms: number }[];
+	peakSwapBytes?: number;
+}
+
+export interface ReportOptions {
+	now?: number;
+	/** Files and lines each passed phase's commit changed. */
+	stats?: ReadonlyMap<number, CommitStats>;
 }
 
 type Saved = { state: SupervisorState; timestamp: number };
@@ -50,8 +77,9 @@ function minus(a: TokenUsage, b: TokenUsage): TokenUsage {
 export function buildReport(
 	entries: readonly SessionEntry[],
 	titles: ReadonlyMap<number, string>,
-	now = Date.now(),
+	options: ReportOptions = {},
 ): RunReport | undefined {
+	const now = options.now ?? Date.now();
 	const all = entries.flatMap((entry) =>
 		entry.type === "supervisor" ? [{ state: entry.state, timestamp: entry.timestamp }] : [],
 	);
@@ -80,6 +108,15 @@ export function buildReport(
 				result: "running",
 				actor: NO_USAGE,
 				critic: NO_USAGE,
+				verdicts: [],
+				guardTrips: 0,
+				toolCalls: 0,
+				failedTools: 0,
+				hints: 0,
+				trims: 0,
+				leftovers: 0,
+				readingMs: 0,
+				writingMs: 0,
 				criticAtStart: state.criticUsage ?? NO_USAGE,
 			};
 			phases.set(state.phase, phase);
@@ -99,8 +136,12 @@ export function buildReport(
 		if (next && state.status === "running" && state.stage === "audit") {
 			const reachedVerdict =
 				next.state.stage === "actor" || next.state.phase !== state.phase || next.state.status === "done";
-			if (reachedVerdict) phase.audits++;
+			if (reachedVerdict) {
+				phase.audits++;
+				if (next.state.lastVerdict) phase.verdicts.push(next.state.lastVerdict);
+			}
 		}
+		if (next?.state.stuck && next.state.stuck !== state.stuck) phase.guardTrips++;
 		phase.critic = minus((next ?? saves[i]).state.criticUsage ?? NO_USAGE, phase.criticAtStart);
 		if (next && next.state.phase !== state.phase) phase.result = "passed";
 		else if (!next) {
@@ -110,26 +151,60 @@ export function buildReport(
 
 	const report: PhaseReport[] = [];
 	for (const { criticAtStart: _, ...phase } of phases.values()) {
-		let actor = NO_USAGE;
+		const inPhase = (time: number) => time >= phase.startedAt && time <= phase.endedAt;
 		for (const entry of entries) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const { timestamp, usage } = entry.message;
-			if (timestamp < phase.startedAt || timestamp > phase.endedAt || usage.promptTokens === 0) continue;
-			actor = addUsage(actor, {
-				requests: 1,
-				input: usage.promptTokens,
-				cached: usage.cachedTokens,
-				output: usage.completionTokens,
-			});
+			if (entry.type === "event") {
+				if (!inPhase(entry.timestamp)) continue;
+				if (entry.event.kind === "trim") phase.trims++;
+				else if (entry.event.kind === "leftovers") phase.leftovers += entry.event.count;
+				continue;
+			}
+			if (entry.type !== "message" || !inPhase(entry.message.timestamp)) continue;
+			const message = entry.message;
+			if (message.role === "toolResult") {
+				if (message.isError) phase.failedTools++;
+			} else if (message.role === "user") {
+				const text = typeof message.content === "string" ? message.content : "";
+				if (!text.startsWith("[Supervisor]")) phase.hints++;
+			} else {
+				phase.toolCalls += message.content.filter((block) => block.type === "toolCall").length;
+				const { usage, timings } = message;
+				if (usage.promptTokens === 0) continue;
+				phase.actor = addUsage(phase.actor, {
+					requests: 1,
+					input: usage.promptTokens,
+					cached: usage.cachedTokens,
+					output: usage.completionTokens,
+				});
+				if (timings?.promptPerSecond) {
+					phase.readingMs += ((usage.promptTokens - usage.cachedTokens) / timings.promptPerSecond) * 1000;
+				}
+				if (timings?.predictedPerSecond)
+					phase.writingMs += (usage.completionTokens / timings.predictedPerSecond) * 1000;
+			}
 		}
-		report.push({ ...phase, actor });
+		const changes = options.stats?.get(phase.phase);
+		report.push({ ...phase, ...(changes ? { changes } : {}) });
 	}
+	const startedAt = saves[0].timestamp;
+	const endedAt = report.at(-1)?.endedAt ?? last.timestamp;
+	const modelLoads: { model: string; ms: number }[] = [];
+	let peakSwapBytes: number | undefined;
+	for (const entry of entries) {
+		if (entry.type !== "event" || entry.timestamp < startedAt || entry.timestamp > endedAt) continue;
+		if (entry.event.kind === "model-load") modelLoads.push({ model: entry.event.model, ms: entry.event.ms });
+		if (entry.event.kind === "swap") peakSwapBytes = Math.max(peakSwapBytes ?? 0, entry.event.usedBytes);
+	}
+	const run = saves.find((save) => save.state.run)?.state.run;
 	return {
 		plan: last.state.plan,
 		phases: report,
-		startedAt: saves[0].timestamp,
-		endedAt: report.at(-1)?.endedAt ?? last.timestamp,
+		startedAt,
+		endedAt,
 		status: last.state.status,
+		...(run ? { run } : {}),
+		modelLoads,
+		...(peakSwapBytes !== undefined ? { peakSwapBytes } : {}),
 	};
 }
 
@@ -152,9 +227,41 @@ function totals(report: RunReport) {
 		manualMs: sum((phase) => phase.manualMs),
 		waitingMs: sum((phase) => phase.waitingMs),
 		audits: sum((phase) => phase.audits),
+		guardTrips: sum((phase) => phase.guardTrips),
+		toolCalls: sum((phase) => phase.toolCalls),
+		failedTools: sum((phase) => phase.failedTools),
+		hints: sum((phase) => phase.hints),
+		trims: sum((phase) => phase.trims),
+		leftovers: sum((phase) => phase.leftovers),
+		readingMs: sum((phase) => phase.readingMs),
+		writingMs: sum((phase) => phase.writingMs),
+		files: sum((phase) => phase.changes?.files ?? 0),
+		added: sum((phase) => phase.changes?.added ?? 0),
+		removed: sum((phase) => phase.changes?.removed ?? 0),
 		actor: report.phases.reduce((total, phase) => addUsage(total, phase.actor), NO_USAGE),
 		critic: report.phases.reduce((total, phase) => addUsage(total, phase.critic), NO_USAGE),
 	};
+}
+
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+const gigabytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
+/** One line naming what the run ran on. */
+function describeRun(run: RunInfo): string {
+	const llama = run.llamaServer ? ` · llama.cpp ${run.llamaServer.replace(/^version:\s*/i, "")}` : "";
+	return `${run.actor} (${run.mode}, ponytail ${run.ponytail}) · critic ${run.critic} · Arc ${run.arc}${llama} · ${run.memoryGB} GB, ${run.platform}`;
+}
+
+/** Model loads, grouped by model: `Qwen x9 (avg 14s), Ornith x9 (avg 6s)`. */
+function describeLoads(loads: RunReport["modelLoads"]): string {
+	const byModel = new Map<string, number[]>();
+	for (const load of loads) byModel.set(load.model, [...(byModel.get(load.model) ?? []), load.ms]);
+	return [...byModel]
+		.map(
+			([model, times]) =>
+				`${model} x${times.length} (avg ${formatSpan(times.reduce((a, b) => a + b, 0) / times.length)})`,
+		)
+		.join(", ");
 }
 
 /** Time a phase took: the actor, manual work, and review; not time spent waiting for a person. */
@@ -209,6 +316,16 @@ export function formatReportText(report: RunReport): string {
 	if (t.manualMs > 0)
 		lines.push(`* includes ${formatSpan(t.manualMs)} of work on messages typed while the loop was halted.`);
 	if (t.waitingMs > 0) lines.push(`Waiting for you, not counted above: ${formatSpan(t.waitingMs)}.`);
+	const events = [
+		plural(t.trims, "trim"),
+		plural(t.guardTrips, "loop-guard stop"),
+		plural(t.hints, "hint"),
+		`${plural(t.failedTools, "failed tool call")} of ${n(t.toolCalls)}`,
+		...(report.modelLoads.length > 0 ? [`loads: ${describeLoads(report.modelLoads)}`] : []),
+		...(report.peakSwapBytes !== undefined ? [`peak swap ${gigabytes(report.peakSwapBytes)}`] : []),
+	];
+	lines.push(`Events: ${events.join(" · ")}.`);
+	if (report.run) lines.push(`Setup: ${describeRun(report.run)}.`);
 	return lines.join("\n");
 }
 
@@ -242,5 +359,36 @@ export function formatReportMarkdown(report: RunReport): string {
 	if (t.manualMs > 0) {
 		lines.push("", `\\* Includes ${formatSpan(t.manualMs)} of work on messages typed while the loop was halted.`);
 	}
+	const cell = (value: string) => value.replace(/\|/g, "\\|");
+	lines.push(
+		"",
+		"## Work",
+		"",
+		"| Phase | Files | Lines | Tool calls | Failed | Trims | Loop guard | Hints | Leftovers | Reading | Writing |",
+		"|---|---|---|---|---|---|---|---|---|---|---|",
+		...report.phases.map(
+			(phase) =>
+				`| ${phase.phase} ${cell(phase.title)} | ${phase.changes ? n(phase.changes.files) : ""} | ${phase.changes ? `+${n(phase.changes.added)} / -${n(phase.changes.removed)}` : ""} | ${n(phase.toolCalls)} | ${n(phase.failedTools)} | ${phase.trims} | ${phase.guardTrips} | ${phase.hints} | ${phase.leftovers} | ${formatSpan(phase.readingMs)} | ${formatSpan(phase.writingMs)} |`,
+		),
+		`| **Total** | ${n(t.files)} | +${n(t.added)} / -${n(t.removed)} | ${n(t.toolCalls)} | ${n(t.failedTools)} | ${t.trims} | ${t.guardTrips} | ${t.hints} | ${t.leftovers} | ${formatSpan(t.readingMs)} | ${formatSpan(t.writingMs)} |`,
+		"",
+		"Reading and Writing are the actor's time processing prompts and generating replies, from llama-server's measured speeds; the rest of its time is tools and model loads.",
+	);
+	const failed = report.phases.flatMap((phase) =>
+		phase.verdicts.flatMap((verdict, index) =>
+			verdict.pass ? [] : [`- Phase ${phase.phase}, try ${index + 1}: ${verdict.reasons.join(" / ")}`],
+		),
+	);
+	lines.push(
+		"",
+		"## Failed tries",
+		"",
+		...(failed.length > 0 ? failed : ["None: every phase passed its first audit."]),
+	);
+	lines.push("", "## Setup and events", "");
+	if (report.run) lines.push(`- Setup: ${describeRun(report.run)}`);
+	if (report.modelLoads.length > 0) lines.push(`- Model loads: ${describeLoads(report.modelLoads)}`);
+	if (report.peakSwapBytes !== undefined) lines.push(`- Peak swap: ${gigabytes(report.peakSwapBytes)}`);
+	lines.push(`- Processes the actor left running, stopped before checks: ${t.leftovers}`);
 	return `${lines.join("\n")}\n`;
 }

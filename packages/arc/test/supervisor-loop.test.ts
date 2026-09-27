@@ -334,7 +334,7 @@ describe("supervisor report", () => {
 	it("splits each phase into actor, review, manual work, and waiting, with its tries and tokens", () => {
 		const report = buildReport(entries, new Map([[1, "Types"]]));
 		expect(report?.status).toBe("done");
-		expect(report?.phases).toEqual([
+		expect(report?.phases).toMatchObject([
 			{
 				phase: 1,
 				title: "Types",
@@ -377,6 +377,93 @@ describe("supervisor report", () => {
 		const markdown = formatReportMarkdown(report);
 		expect(markdown).toContain("| 1 Types | passed | 2m | 2m | 20s | 2 | 100 | 100 | 10 | 2,500 | 10 |");
 		expect(markdown).toContain("- Critic tokens: 3,000 in, 12 out, 3 reviews");
+	});
+
+	it("counts verdicts, loop-guard stops, hints, tools, and events, and names the setup", () => {
+		const run = {
+			actor: "Qwen",
+			critic: "Ornith",
+			mode: "instruct",
+			ponytail: "full",
+			arc: "0.0.1 (abc1234)",
+			llamaServer: "version: 6500 (1a2b3c)",
+			memoryGB: 16,
+			platform: "darwin arm64",
+		};
+		const failed = { pass: false, reasons: ["Check failed: npm test"] };
+		const step = (timestamp: number, calls: number): SessionEntry =>
+			({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: Array.from({ length: calls }, (_, i) => ({
+						type: "toolCall",
+						id: `${timestamp}${i}`,
+						name: "bash",
+						arguments: {},
+					})),
+					model: "m",
+					usage: { promptTokens: 1100, cachedTokens: 100, completionTokens: 50 },
+					timings: { promptPerSecond: 100, predictedPerSecond: 5 },
+					stopReason: "toolUse",
+					timestamp,
+				},
+			}) as SessionEntry;
+		const events: SessionEntry[] = [
+			save(0, { ...state(1, "running", "actor"), run }),
+			step(10 * s, 2),
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "x",
+					toolName: "bash",
+					content: [],
+					isError: true,
+					timestamp: 11 * s,
+				},
+			},
+			{
+				type: "event",
+				event: { kind: "trim", droppedMessages: 4, compactedSteps: 2, estimatedTokens: 12000 },
+				timestamp: 12 * s,
+			},
+			{ type: "event", event: { kind: "model-load", model: "Qwen", ms: 14 * s }, timestamp: 13 * s },
+			{ type: "event", event: { kind: "swap", usedBytes: 2 * 1024 ** 3 }, timestamp: 14 * s },
+			save(20 * s, { ...state(1, "running", "audit"), stuck: "it made the same call 3 times" }),
+			{ type: "event", event: { kind: "leftovers", count: 2 }, timestamp: 21 * s },
+			save(30 * s, { ...state(1, "running", "actor"), lastVerdict: failed, failures: 1 }),
+			{ type: "message", message: { role: "user", content: "try the other config", timestamp: 31 * s } },
+			step(40 * s, 1),
+			save(50 * s, state(1, "running", "audit")),
+			save(60 * s, { ...state(1, "done", "audit"), lastVerdict: { pass: true, reasons: [] } }),
+		];
+		const report = buildReport(events, new Map(), { stats: new Map([[1, { files: 3, added: 40, removed: 2 }]]) });
+		if (!report) throw new Error("no report");
+		expect(report.phases[0]).toMatchObject({
+			verdicts: [failed, { pass: true, reasons: [] }],
+			guardTrips: 1,
+			toolCalls: 3,
+			failedTools: 1,
+			hints: 1,
+			trims: 1,
+			leftovers: 2,
+			readingMs: 20 * s,
+			writingMs: 20 * s,
+			changes: { files: 3, added: 40, removed: 2 },
+		});
+		expect(report.modelLoads).toEqual([{ model: "Qwen", ms: 14 * s }]);
+		expect(report.peakSwapBytes).toBe(2 * 1024 ** 3);
+		const text = formatReportText(report);
+		expect(text).toContain(
+			"Events: 1 trim · 1 loop-guard stop · 1 hint · 1 failed tool call of 3 · loads: Qwen x1 (avg 14s) · peak swap 2.0 GB.",
+		);
+		expect(text).toContain(
+			"Setup: Qwen (instruct, ponytail full) · critic Ornith · Arc 0.0.1 (abc1234) · llama.cpp 6500 (1a2b3c) · 16 GB, darwin arm64.",
+		);
+		const markdown = formatReportMarkdown(report);
+		expect(markdown).toContain("| 1 Phase 1 | 3 | +40 / -2 | 3 | 1 | 1 | 1 | 1 | 2 | 20s | 20s |");
+		expect(markdown).toContain("- Phase 1, try 1: Check failed: npm test");
 	});
 
 	it("reports nothing for a session without a supervisor run", () => {

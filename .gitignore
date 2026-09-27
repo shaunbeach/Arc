@@ -9,6 +9,7 @@ coverage/
 # Local model configuration holds machine-specific paths.
 models.yml
 models-*.yml
+models.yml.bak*
 
 # Copied from the repository root by the Arc prepack script.
 packages/arc/README.md

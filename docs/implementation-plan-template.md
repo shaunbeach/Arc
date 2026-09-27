@@ -2,6 +2,8 @@
 
 Give this file to the model that writes the plan, for example: *"Read Spec.md and write implementation.md following docs/implementation-plan-template.md."* Part 1 is rules for the writer. Part 2 is the skeleton to fill in. The finished plan contains only Part 2's shape, never Part 1.
 
+Related: [spec-template.md](spec-template.md) for the spec the plan is written from, [verify-presets.md](verify-presets.md) for check lines per stack, and [conventions-template.md](conventions-template.md) for an `AGENTS.md` that every phase brief includes. Before a run, `/supervise check implementation.md` points out the usual mistakes.
+
 ## Part 1: Rules for the plan writer
 
 The plan is executed unattended: an actor model builds one phase at a time with a small context window, shell checks run, and a critic model reviews the diff. Nobody is watching. Write so that a small model, reading only one phase, can finish it and prove it.
@@ -17,6 +19,7 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 - One concern per phase, at most about 8 tasks, and a list of the files it may create or change. A phase should fit comfortably in a 20k-token window together with the files it reads.
 - Order phases so each one builds on verified work: types, then plumbing, then wiring, then UI, then features, then final checks.
 - Put exact values in the plan (names, paths, strings, numbers), not "something like".
+- End each phase's tasks with **Done when** bullets: short, checkable statements of what is true when the phase is finished. The critic checks them one by one, so they are the phase's acceptance criteria. Anything a command can check belongs in `verify` too.
 
 **Checks (the `verify` block):**
 
@@ -71,6 +74,10 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 - [ ] <task>
 - [ ] Add scripts to `package.json`: `"dev": "..."`, `"build": "..."`, `"typecheck": "..."`.
 
+**Done when:**
+- <checkable statement, e.g. "`npm run build` writes out/main/index.js">
+- <checkable statement>
+
 ```verify
 npm run typecheck
 npm run build && test -f <exact output path 1> && test -f <exact output path 2>
@@ -91,6 +98,9 @@ npm run build && test -f <exact output path 1> && test -f <exact output path 2>
 
 - [ ] ...
 
+**Done when:**
+- ...
+
 ```verify
 npm run typecheck
 test "$(grep -c '<exact required string>' <file>)" = 1
@@ -108,6 +118,10 @@ test "$(grep -c '<exact required string>' <file>)" = 1
 **Files:** <files the sweep may touch>
 
 - [ ] <each acceptance item as a checkable task>
+- [ ] The dev server still runs on its fixed port with strictPort.
+
+**Done when:**
+- <each item of the spec's acceptance checklist that the code can show>
 
 ```verify
 npm run typecheck

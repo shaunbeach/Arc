@@ -18,7 +18,9 @@ import {
 	phaseStartRef,
 } from "../src/supervisor/git.ts";
 import { RepeatGuard } from "../src/supervisor/guard.ts";
+import { formatLint, lintPlan } from "../src/supervisor/lint.ts";
 import { nextPhase, PlanError, parsePlan } from "../src/supervisor/plan.ts";
+import { kickoffMessage } from "../src/supervisor/supervisor.ts";
 import { formatUsage, tallyUsage } from "../src/usage.ts";
 
 describe("parsePlan", () => {
@@ -371,5 +373,66 @@ describe("usage", () => {
 		const usage = tallyUsage([reply(1000, 0, 50), reply(1200, 1000, 40), reply(0, 0, 0)]);
 		expect(usage).toEqual({ requests: 2, input: 2200, cached: 1000, output: 90 });
 		expect(formatUsage(usage)).toBe("2,200 in (1,000 cached, 1,200 new) · 90 out · 2 requests");
+	});
+});
+
+describe("plan lint", () => {
+	it("flags checks that never exit, leave processes behind, or pass only on a match", () => {
+		const { findings } = lintPlan(
+			[
+				"## Phase 1: A",
+				"```verify",
+				"npm run typecheck",
+				"npm run dev",
+				"(npm run dev > /tmp/dev.log 2>&1 &); sleep 5; curl -s localhost:5173",
+				"rg 'fetch\\(' src",
+				"! rg 'fetch\\(' src",
+				'test "$(grep -c x a.ts)" = 1',
+				"```",
+				"## Phase 3: B",
+				"Text only.",
+			].join("\n"),
+		);
+		expect(findings.map((finding) => `${finding.phase}: ${finding.message.split(".")[0]}`)).toEqual([
+			"1: `npm run dev` never exits on its own",
+			"1: `(npm run dev > /tmp/dev",
+			"1: This startup check probes a fixed port",
+			"1: `rg 'fetch\\(' src` passes only when it finds a match",
+			"3: Numbered 3 after phase 1",
+			"3: No ```verify block: only the critic will judge this phase",
+		]);
+	});
+
+	it("passes a startup check that stops what it started on a pinned port, and flags large phases", () => {
+		const tasks = Array.from({ length: 11 }, (_, i) => `- [ ] task ${i}`).join("\n");
+		const { findings } = lintPlan(
+			[
+				"## Phase 0: A",
+				"Pin the port with strictPort.",
+				"```verify",
+				'(npm run dev > /tmp/dev.log 2>&1 &); sleep 20; code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/); pkill -f electron-vite; test "$code" = 200',
+				"```",
+				"## Phase 1: B",
+				tasks,
+				"```verify",
+				"npm test",
+				"```",
+			].join("\n"),
+		);
+		expect(findings).toEqual([{ phase: 1, message: expect.stringMatching(/^Large \(11 tasks/) }]);
+		expect(formatLint(lintPlan("# no phases"))).toMatch(/^Plan check: The plan has no phases/);
+	});
+});
+
+describe("phase brief", () => {
+	it("carries the project's AGENTS.md, cut to a few thousand characters", () => {
+		const phase = { number: 1, title: "A", body: "Do it.", verify: [] };
+		expect(kickoffMessage(phase, [phase], "plan.md", [], "Use tabs.")).toContain(
+			"Do it.\n\nProject conventions (AGENTS.md):\nUse tabs.",
+		);
+		const long = kickoffMessage(phase, [phase], "plan.md", [], "x".repeat(5000));
+		expect(long).toContain("[... the rest of AGENTS.md]");
+		expect(long.length).toBeLessThan(3500);
+		expect(kickoffMessage(phase, [phase], "plan.md", [])).not.toContain("AGENTS.md");
 	});
 });
