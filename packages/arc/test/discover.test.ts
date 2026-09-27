@@ -98,6 +98,21 @@ describe("fetchServerProps without /props", () => {
 		});
 	});
 
+	it("takes image input from the listed capabilities, as turbo-fieldfare reports them", async () => {
+		const listing = (capabilities: unknown) =>
+			(async (input: string | URL | Request) =>
+				new URL(String(input)).pathname === "/v1/models"
+					? Response.json({ object: "list", data: [{ id: "gemma-4-26b-a4b-it", capabilities }] })
+					: Response.json({ error: { message: "route not found" } }, { status: 404 })) as typeof fetch;
+		const withImage = await fetchServerProps("http://localhost:8083/v1", listing(["text", "image"]));
+		expect(withImage?.vision).toBe(true);
+		if (!withImage) throw new Error("expected props");
+		expect(resolveDiscoveredModel(PLACEHOLDER, withImage).input).toEqual(["text", "image"]);
+		// Text only, or a malformed list: no images are sent.
+		expect((await fetchServerProps("http://localhost:8083/v1", listing(["text"])))?.vision).toBe(false);
+		expect((await fetchServerProps("http://localhost:8083/v1", listing("image")))?.vision).toBe(false);
+	});
+
 	it("gives up when /v1/models lists nothing", async () => {
 		expect(await fetchServerProps("http://localhost:8080/v1", openAiFetch([]))).toBeUndefined();
 	});

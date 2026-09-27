@@ -58,17 +58,37 @@ export async function fetchModelIds(
 	fetchFn: typeof fetch = fetch,
 	signal?: AbortSignal,
 ): Promise<string[] | undefined> {
+	return (await fetchListedModels(baseUrl, fetchFn, signal))?.map((model) => model.id);
+}
+
+/** A model as `/v1/models` lists it. `capabilities` is non-standard; turbo-fieldfare sends `["text", "image"]`. */
+export interface ListedModel {
+	id: string;
+	capabilities: string[];
+}
+
+/** Every model the OpenAI-compatible server at `baseUrl` lists, or undefined when it lists none. */
+export async function fetchListedModels(
+	baseUrl: string,
+	fetchFn: typeof fetch = fetch,
+	signal?: AbortSignal,
+): Promise<ListedModel[] | undefined> {
 	try {
 		const response = await fetchFn(`${baseUrl.replace(/\/+$/, "")}/models`, { signal });
 		if (!response.ok) return undefined;
 		const body = (await response.json()) as { data?: unknown };
 		if (!Array.isArray(body.data)) return undefined;
-		const ids = body.data
-			.map((entry: unknown) =>
-				typeof entry === "object" && entry !== null ? (entry as { id?: unknown }).id : undefined,
-			)
-			.filter((id): id is string => typeof id === "string" && id !== "");
-		return ids.length > 0 ? ids : undefined;
+		const models: ListedModel[] = [];
+		for (const entry of body.data as unknown[]) {
+			if (typeof entry !== "object" || entry === null) continue;
+			const { id, capabilities } = entry as { id?: unknown; capabilities?: unknown };
+			if (typeof id !== "string" || id === "") continue;
+			const listed = Array.isArray(capabilities)
+				? capabilities.filter((c): c is string => typeof c === "string")
+				: [];
+			models.push({ id, capabilities: listed });
+		}
+		return models.length > 0 ? models : undefined;
 	} catch {
 		return undefined;
 	}

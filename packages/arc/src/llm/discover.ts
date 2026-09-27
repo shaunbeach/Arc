@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { LiteModel } from "../config/models.ts";
-import { fetchModelIds, serverOrigin } from "./server.ts";
+import { fetchListedModels, serverOrigin } from "./server.ts";
 
 /**
  * What the server tells us about the model it is already running: from llama-server's `/props`, or, for another
@@ -95,17 +95,20 @@ export async function fetchServerProps(
 }
 
 /**
- * The first model an OpenAI-compatible server lists at `/v1/models`. Such a server reports no window or
- * capabilities, so those stay unset or conservative here and models.yml fills them in.
+ * The first model an OpenAI-compatible server lists at `/v1/models`. Such a server reports no window or thinking
+ * switch, so those stay unset or conservative here and models.yml fills them in. Image input is taken from the
+ * entry's `capabilities` when the server lists them (turbo-fieldfare does, once its vision pack loaded).
  */
 export async function fetchListedModel(
 	baseUrl: string,
 	fetchFn: typeof fetch = fetch,
 	signal?: AbortSignal,
 ): Promise<ServerProps | undefined> {
-	const id = (await fetchModelIds(baseUrl, fetchFn, signal))?.[0];
-	if (id === undefined) return undefined;
-	return { modelPath: id, servedModel: id, vision: false, reasoning: false, reasoningEffort: false, tools: true };
+	const listed = (await fetchListedModels(baseUrl, fetchFn, signal))?.[0];
+	if (listed === undefined) return undefined;
+	const { id } = listed;
+	const vision = listed.capabilities.includes("image");
+	return { modelPath: id, servedModel: id, vision, reasoning: false, reasoningEffort: false, tools: true };
 }
 
 /** `/models/ornith-1.5/Ornith-1.5-9B-Q4_K_M.gguf` -> `Ornith-1.5-9B-Q4_K_M`. */
