@@ -40,14 +40,19 @@ export function writeMemoryWing(cwd: string, wing: string): void {
 	writeFileSync(path, `${JSON.stringify({ wing }, null, "\t")}\n`);
 }
 
-/** A wing name from the project folder: "My App" becomes "my_app". */
-export function defaultWing(cwd: string): string {
+/** A wing name as the palace stores it: "My-App" becomes "my_app", so a folder name finds its wing. */
+export function wingName(name: string): string {
 	return (
-		basename(cwd)
+		name
 			.toLowerCase()
 			.replace(/[^a-z0-9]+/g, "_")
 			.replace(/^_+|_+$/g, "") || "project"
 	);
+}
+
+/** A wing name from the project folder. */
+export function defaultWing(cwd: string): string {
+	return wingName(basename(cwd));
 }
 
 /** Run the CLI and return stdout. A missing binary gets an install hint instead of ENOENT. */

@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import type { AgentTool } from "../agent/types.ts";
-import { runMempalace } from "../rag/mempalace.ts";
+import { runMempalace, wingName } from "../rag/mempalace.ts";
 import type { ToolLimits } from "./options.ts";
 
 const memorySchema = Type.Object({
@@ -23,7 +23,7 @@ export function createMemoryTool(projectWing: string | undefined, limits: ToolLi
 		async execute(_toolCallId, { query, wing: named }, signal, onUpdate) {
 			const q = query.trim();
 			if (!q) throw new Error("query is required.");
-			const wing = named?.trim() || projectWing;
+			const wing = named?.trim() ? wingName(named) : projectWing;
 			if (!wing) throw new Error("This project has no wing (/mempalace). Pass the wing to search.");
 			onUpdate?.({ content: [{ type: "text", text: `Searching memory (${wing}) for "${q}"…` }] });
 			const output = (

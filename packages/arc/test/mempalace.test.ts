@@ -2,13 +2,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { defaultWing, readMemoryWing, transcriptText, writeMemoryWing } from "../src/rag/mempalace.ts";
+import { defaultWing, readMemoryWing, transcriptText, wingName, writeMemoryWing } from "../src/rag/mempalace.ts";
 import { createCodingTools, toolLimitsFor } from "../src/tools/index.ts";
 
 describe("mempalace", () => {
 	it("names the wing after the project folder", () => {
 		expect(defaultWing("/work/My App")).toBe("my_app");
 		expect(defaultWing("/")).toBe("project");
+		expect(wingName("mempal-a")).toBe("mempal_a");
 	});
 
 	it("reads back the wing /mempalace wrote", () => {
