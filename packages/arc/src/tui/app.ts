@@ -24,7 +24,7 @@ import { findModel, type LiteModel, type ModelsConfig, modelLabel } from "../con
 import { getAppDir } from "../config/paths.ts";
 import { defaultSamplingMode, type SamplingMode } from "../config/sampling.ts";
 import { describeTrim } from "../context.ts";
-import { fetchServerProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
+import { fetchServerProps, listedProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
 import { getLocalIpAddress, type LlamaServerManager, serverOrigin, serverPort } from "../llm/server.ts";
 import {
 	DEFAULT_SWAP_THRESHOLD_BYTES,
@@ -1339,7 +1339,9 @@ class InteractiveApp {
 				this.notice(style.red(`Nothing is serving at ${origin}. Start llama-server there, then try again.`));
 				return false;
 			}
-			const model = resolveDiscoveredModel(placeholder, props);
+			const chosen = props.listed ? await this.pickListed(placeholder, props) : props;
+			if (!chosen) return false;
+			const model = resolveDiscoveredModel(placeholder, chosen);
 			this.adoptModel(model, this.connectMode);
 			this.connectMode = undefined;
 			this.notice(style.gray(describeDiscovered(model, props, origin)));
@@ -1348,6 +1350,33 @@ class InteractiveApp {
 			this.setStatus(undefined);
 			if (!this.agent.isRunning) this.setAiStatus("idle");
 		}
+	}
+
+	/**
+	 * A server that lists several models, such as TinyTitan's router, loads whichever a request names, so ask which
+	 * one to use. The one already in use is listed first. Undefined when the picker is dismissed.
+	 */
+	private pickListed(placeholder: LiteModel, props: ServerProps): Promise<ServerProps | undefined> {
+		this.setStatus(undefined);
+		this.setAiStatus("idle");
+		const listed = props.listed ?? [];
+		const current = this.agent.model?.name === placeholder.name ? this.agent.model.servedModel : undefined;
+		const ordered = [...listed].sort((a, b) => Number(b.id === current) - Number(a.id === current));
+		const items: SelectItem[] = ordered.map((model) => ({
+			value: model.id,
+			label: model.id === current ? `${model.id} (current)` : model.id,
+		}));
+		return new Promise((resolve) => {
+			this.pick(
+				`${placeholder.name} serves ${listed.length} models`,
+				items,
+				(id) => {
+					const model = listed.find((entry) => entry.id === id);
+					resolve(model ? listedProps(model) : undefined);
+				},
+				() => resolve(undefined),
+			);
+		});
 	}
 
 	/** Everything that changes when a model becomes the current one, once it is fully known. */
@@ -1719,7 +1748,7 @@ class InteractiveApp {
 	}
 
 	/** Temporarily put a picker where the editor is. */
-	private pick(title: string, items: SelectItem[], onSelect: (value: string) => void): void {
+	private pick(title: string, items: SelectItem[], onSelect: (value: string) => void, onCancel?: () => void): void {
 		const list = new SelectList(items, Math.min(items.length, 10), selectListTheme, {
 			minPrimaryColumnWidth: 12,
 			maxPrimaryColumnWidth: 72,
@@ -1735,7 +1764,10 @@ class InteractiveApp {
 			close();
 			onSelect(item.value);
 		};
-		list.onCancel = close;
+		list.onCancel = () => {
+			close();
+			onCancel?.();
+		};
 		this.picking = true;
 		this.editorSlot.clear();
 		this.editorSlot.addChild(new Text(style.bold(title), 1, 0));

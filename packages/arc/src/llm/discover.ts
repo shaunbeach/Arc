@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { LiteModel } from "../config/models.ts";
-import { fetchListedModels, serverOrigin } from "./server.ts";
+import { fetchListedModels, type ListedModel, serverOrigin } from "./server.ts";
 
 /**
  * What the server tells us about the model it is already running: from llama-server's `/props`, or, for another
@@ -20,6 +20,11 @@ export interface ServerProps {
 	 * llama-server ignores the request's `model` field; other servers route on it.
 	 */
 	servedModel?: string;
+	/**
+	 * Every model such a server lists, when it lists more than one. A router like TinyTitan lists all it can serve and
+	 * loads whichever a request names, so the first is not necessarily the one running; the user picks.
+	 */
+	listed?: ListedModel[];
 	/** `modalities.vision`: whether the server loaded a projector. */
 	vision: boolean;
 	/**
@@ -104,8 +109,13 @@ export async function fetchListedModel(
 	fetchFn: typeof fetch = fetch,
 	signal?: AbortSignal,
 ): Promise<ServerProps | undefined> {
-	const listed = (await fetchListedModels(baseUrl, fetchFn, signal))?.[0];
-	if (listed === undefined) return undefined;
+	const models = await fetchListedModels(baseUrl, fetchFn, signal);
+	if (models === undefined) return undefined;
+	return { ...listedProps(models[0]), ...(models.length > 1 ? { listed: models } : {}) };
+}
+
+/** Props for one model from a `/v1/models` list, such as the one picked among several. */
+export function listedProps(listed: ListedModel): ServerProps {
 	const { id } = listed;
 	const vision = listed.capabilities.includes("image");
 	return { modelPath: id, servedModel: id, vision, reasoning: false, reasoningEffort: false, tools: true };
