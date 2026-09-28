@@ -9,6 +9,7 @@ export type CommandName =
 	| "chat"
 	| "web"
 	| "rag"
+	| "mempalace"
 	| "ponytail"
 	| "model"
 	| "mode"
@@ -29,6 +30,11 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
 	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
 	{ name: "rag", description: "Let the model search the offline knowledge base", argumentHint: "[on|off]" },
+	{
+		name: "mempalace",
+		description: "Save sessions to MemPalace and let the model search them (this project)",
+		argumentHint: "[wing]",
+	},
 	{
 		name: "ponytail",
 		description: "Steer the model to the smallest code that works",

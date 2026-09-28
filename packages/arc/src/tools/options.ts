@@ -20,6 +20,11 @@ export interface CodingToolOptions {
 	allowLocalNetwork?: () => boolean;
 	/** The offline archives kb_search reads (models.yml `rag:`). Without one, there is no kb_search. */
 	knowledgeBase?: KnowledgeBase;
+	/**
+	 * The memory tool, when a MemPalace exists: `wing` is this project's (`/mempalace`), searched by default. Without
+	 * this, there is no memory tool.
+	 */
+	memory?: { wing?: string };
 }
 
 const MIN_OUTPUT_BYTES = 4 * 1024;

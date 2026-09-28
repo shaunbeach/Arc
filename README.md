@@ -137,6 +137,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
 | `/rag [on\|off]` | Let the model search your offline knowledge base. Without an argument, toggles. See [Knowledge base](#knowledge-base). |
+| `/mempalace [wing]` | Save this project's sessions to MemPalace and let the model search them. See [Memory](#memory). |
 | `/ponytail [off\|lite\|full\|ultra]` | Steer the model to the smallest code that works. Without an argument, pick a level. See [Ponytail](#ponytail). |
 | `/compact [threshold]` | Ask the model which old tool results it still needs, and cut the rest. See [Context window](#context-window). |
 | `/serve [name]` | Host a model for other machines. See [Hosting](#hosting). |
@@ -201,6 +202,15 @@ rag:
 - **Searching** returns five results with short snippets, about 1,200 tokens. It combines kiwix's full-text ranking with title matches, so "deepest point of the atlantic ocean" puts *Atlantic Ocean* first.
 - **Reading** an article returns only the parts that match the question: the opening paragraphs, then the best-matching sections, up to a fifth of the room in the context window (about 7,000 characters for a 20k window), without links, citation marks, info boxes, or reference lists. A whole Wikipedia article can hold 40,000 tokens; the result names the sections it left out, so the model can ask for one.
 - **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when Arc exits. Its output goes to `~/.arc/logs/kiwix-serve.log`.
+
+## Memory
+
+`/mempalace` links the current project to a wing of a local [MemPalace](https://github.com/mempalace/mempalace) (install with `uv tool install mempalace`). The wing defaults to the folder name, and the link is saved in `.arc/mempalace.json`, so run it once per project. From then on, each session's conversation is saved to that wing when it ends (on `/clear`, `/resume`, or exit), and the model gets a `memory` tool to search past sessions for earlier decisions and context. Embedding runs in the background, so a just-finished session is searchable a moment later.
+
+The `memory` tool searches this project's wing by default and can name another. Any project gets the tool once a palace exists (`~/.config/mempalace/palace` or `~/.mempalace`, or `MEMPALACE_PALACE_PATH`), even one that has not run `/mempalace`.
+
+- **Recalling another project.** Working in project B, ask for project A's wing by name: "check memory in project_a for how we set up auth." The model passes `wing: "project_a"` to `memory`.
+- **Recalling an earlier session here.** Nothing is looked up automatically: the model decides from the tool's description when to search and writes the query itself. It usually searches when you refer back ("what did we decide last time about caching?"), but small models may not. To be sure, ask directly: "check memory for the caching decision."
 
 ## Ponytail
 

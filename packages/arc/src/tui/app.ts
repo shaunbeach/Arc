@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { totalmem } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -39,6 +40,14 @@ import type { AssistantMessage, Message } from "../llm/types.ts";
 import { isPonytailLevel, PONYTAIL_LEVEL_RULES, PONYTAIL_LEVELS } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
 import { KiwixKnowledgeBase } from "../rag/kiwix.ts";
+import {
+	defaultWing,
+	palaceExists,
+	readMemoryWing,
+	runMempalace,
+	saveToPalace,
+	writeMemoryWing,
+} from "../rag/mempalace.ts";
 import {
 	type LoadedSession,
 	listSessions,
@@ -153,6 +162,8 @@ class InteractiveApp {
 	private readonly appDir = getAppDir();
 	/** The archives `/rag` searches, when models.yml has a `rag:` section. kiwix-serve starts on first use. */
 	private readonly knowledgeBase: KiwixKnowledgeBase | undefined;
+	/** This project's MemPalace wing, from `.arc/mempalace.json`. Sessions are saved there and the memory tool searches it. */
+	private memoryWing: string | undefined;
 	private readonly tui = new TuiMainScreen(new ProcessTerminal());
 	private readonly chat = new Container();
 	/**
@@ -223,6 +234,7 @@ class InteractiveApp {
 			this.knowledgeBase = knowledgeBase;
 			process.once("exit", () => knowledgeBase.stop());
 		}
+		this.memoryWing = readMemoryWing(cwd);
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
 		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
@@ -605,6 +617,9 @@ class InteractiveApp {
 			case "rag":
 				this.switchRag(args);
 				return;
+			case "mempalace":
+				void this.linkMempalace(args);
+				return;
 			case "ponytail":
 				if (args) this.setPonytail(args);
 				else this.pickPonytail();
@@ -654,8 +669,46 @@ class InteractiveApp {
 	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
 	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
 	 */
-	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase"> {
-		return { allowLocalNetwork: () => this.agent.interactionMode === "agent", knowledgeBase: this.knowledgeBase };
+	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory"> {
+		return {
+			allowLocalNetwork: () => this.agent.interactionMode === "agent",
+			knowledgeBase: this.knowledgeBase,
+			memory: this.memoryWing || palaceExists() ? { wing: this.memoryWing } : undefined,
+		};
+	}
+
+	/**
+	 * `/mempalace [wing]`: link this project to a MemPalace wing (default: the folder name). From then on each session
+	 * is saved to the wing when it ends, and the model gets the memory tool to search it. Run again to show the link.
+	 */
+	private async linkMempalace(arg: string): Promise<void> {
+		const wing = arg.trim();
+		if (!wing && this.memoryWing) {
+			this.notice(style.gray(`This project saves sessions to MemPalace wing "${this.memoryWing}".`));
+			return;
+		}
+		try {
+			await runMempalace(["--help"]);
+		} catch (error) {
+			this.notice(style.red(errorText(error)));
+			return;
+		}
+		this.memoryWing = wing || defaultWing(this.options.cwd);
+		writeMemoryWing(this.options.cwd, this.memoryWing);
+		const model = this.agent.model;
+		if (model) this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
+		this.notice(
+			style.gray(
+				`Linked to MemPalace wing "${this.memoryWing}" (.arc/mempalace.json). Sessions are saved there when they end; the model searches them with memory.`,
+			),
+		);
+		this.updateFooter();
+	}
+
+	/** Save the current conversation to this project's wing, if it has one. */
+	private saveMemory(): void {
+		if (!this.memoryWing) return;
+		saveToPalace(this.appDir, this.memoryWing, this.session?.id ?? randomUUID(), this.agent.messages);
 	}
 
 	/** What the session file records: the model, its sampling mode, and the interaction mode. */
@@ -1540,6 +1593,7 @@ class InteractiveApp {
 	/** `/clear`, also reached as `/new`, `/cls`, and `/reset`. */
 	private newSession(): void {
 		if (!this.requireIdle()) return;
+		this.saveMemory();
 		this.agent.setMessages([]);
 		this.supervisor = undefined;
 		this.sessionName = undefined;
@@ -1639,6 +1693,7 @@ class InteractiveApp {
 		const model = savedModel ?? this.agent.model;
 		const modelChanged = model?.name !== this.agent.model?.name;
 
+		this.saveMemory();
 		this.agent.setMessages(loaded.messages);
 		this.sessionName = loaded.name;
 		this.supervisor = this.restoredSupervisor(loaded.supervisor);
@@ -1803,6 +1858,7 @@ class InteractiveApp {
 			void this.stopServe();
 		}
 		this.knowledgeBase?.stop();
+		this.saveMemory();
 		// Leave the final frame on screen as it is now (for example with the submitted /quit cleared).
 		this.status.setText("");
 		this.tui.renderNow();
