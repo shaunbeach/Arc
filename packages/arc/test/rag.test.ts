@@ -267,6 +267,43 @@ describe("kb_search with shelves", () => {
 	});
 });
 
+describe("kb_search with a bare title", () => {
+	const reads: string[] = [];
+	const kb: KnowledgeBase = {
+		shelves: [{ name: "general", books: ["wiki"], keywords: ["general"] }],
+		search: async () => ({ total: 0, hits: [] }),
+		article: async (id) => {
+			reads.push(id);
+			return id === "wiki_2026-06/Atlantic_Ocean"
+				? "<html><head><title>Atlantic Ocean</title></head><body><p>The Milwaukee Deep.</p></body></html>"
+				: undefined;
+		},
+		resolveArticle: async (id, query, _signal, shelf) =>
+			id === "Atlantic_Ocean" && query === "deepest" && shelf === "general"
+				? "wiki_2026-06/Atlantic_Ocean"
+				: undefined,
+	};
+	const tool = createKbSearchTool(kb, toolLimitsFor(20_000, 8192));
+	const run = async (args: { query: string; article?: string; shelf?: string }) => {
+		const result = await tool.execute("id", args);
+		const [first] = result.content;
+		return first.type === "text" ? first.text : "";
+	};
+
+	it("reads the article the title resolves to, and shows its full id", async () => {
+		expect(await run({ query: "deepest", article: "Atlantic Ocean", shelf: " general " })).toBe(
+			"Atlantic Ocean (wiki_2026-06/Atlantic_Ocean):\n\nThe Milwaukee Deep.",
+		);
+		expect(reads).toEqual(["Atlantic_Ocean", "wiki_2026-06/Atlantic_Ocean"]);
+	});
+
+	it("says how to name an article when the title resolves to nothing", async () => {
+		await expect(run({ query: "deepest", article: "Pacific Ocean", shelf: "general" })).rejects.toThrow(
+			'No article "Pacific_Ocean" in the knowledge base. Pass the article line from kb_search results',
+		);
+	});
+});
+
 describe("kb_search", () => {
 	const kb: KnowledgeBase = {
 		search: async (query) =>
@@ -388,6 +425,93 @@ describe("KiwixKnowledgeBase", () => {
 			const fellBack = await kb.search("zebra", 5, undefined, "python");
 			expect(fellBack).toMatchObject({ emptyShelf: "python", total: 1 });
 			expect(searches.slice(-2)).toEqual([["devdocs_en_python_2026-08"], []]);
+		} finally {
+			kb.stop();
+		}
+	});
+
+	it("resolves an article named by its title, or without its archive's date", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "arc-rag-"));
+		writeFileSync(join(dir, "a.zim"), "");
+		writeFileSync(join(dir, "shelves.yml"), SHELVES_YML);
+		const server = join(dir, "fake-kiwix-serve");
+		writeFileSync(server, "#!/bin/sh\nexec sleep 30\n");
+		chmodSync(server, 0o755);
+		const catalog = `<feed>${[
+			["wikipedia_en-simple_all", "wikipedia_en-simple_all_nopic_2026-06"],
+			["devdocs_en_python", "devdocs_en_python_2026-08"],
+		]
+			.map(
+				([name, content]) =>
+					`<entry><title>${name}</title><name>${name}</name><link href="/content/${content}" /></entry>`,
+			)
+			.join("")}</feed>`;
+		// Both archives hold a "Tuple" page; only Wikipedia holds "Atlantic Ocean".
+		const titles: Record<string, { value: string; path: string }[]> = {
+			"wikipedia_en-simple_all_nopic_2026-06": [
+				{ value: "Atlantic Ocean", path: "Atlantic_Ocean" },
+				{ value: "Atlantic City", path: "Atlantic_City" },
+				{ value: "Tuple", path: "Tuple" },
+				{ value: "Pandas", path: "Pandas" },
+			],
+			"devdocs_en_python_2026-08": [{ value: "Tuple", path: "library/stdtypes#tuple" }],
+		};
+		const pages = new Set(["devdocs_en_python_2026-08/reference/frame"]);
+		const fakeFetch = (async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			if (url.pathname.startsWith("/catalog")) return new Response(catalog);
+			if (url.pathname === "/suggest") {
+				const term = (url.searchParams.get("term") ?? "").toLowerCase();
+				const entries = (titles[url.searchParams.get("content") ?? ""] ?? [])
+					.filter((entry) => entry.value.toLowerCase().startsWith(term))
+					.map((entry) => ({ ...entry, kind: "path" }));
+				return new Response(JSON.stringify(entries));
+			}
+			const path = decodeURIComponent(url.pathname.replace(/^\/content\//, ""));
+			return pages.has(path) ? new Response("<html></html>") : new Response("", { status: 404 });
+		}) as typeof fetch;
+		const kb = new KiwixKnowledgeBase(
+			{ folder: dir, kiwixServe: server },
+			{ logFile: join(dir, "kiwix.log"), fetch: fakeFetch },
+		);
+		try {
+			expect(await kb.resolveArticle("Atlantic_Ocean", "deepest point")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Atlantic_Ocean",
+			);
+			expect(await kb.resolveArticle("atlantic ocean", "")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Atlantic_Ocean",
+			);
+			// Exact titles only: "Atlantic" is not "Atlantic Ocean" or "Atlantic City".
+			expect(await kb.resolveArticle("Atlantic", "")).toBeUndefined();
+			// Only the query's shelf is searched; with no shelf, every archive in the catalog's order.
+			expect(await kb.resolveArticle("tuple", "python tuple unpacking")).toBe(
+				"devdocs_en_python_2026-08/library/stdtypes#tuple",
+			);
+			expect(await kb.resolveArticle("tuple", "what is a tuple")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Tuple",
+			);
+			// A named shelf holds the lookup to its archives, whatever the query says.
+			expect(await kb.resolveArticle("tuple", "what is a tuple", undefined, "python")).toBe(
+				"devdocs_en_python_2026-08/library/stdtypes#tuple",
+			);
+			expect(await kb.resolveArticle("pandas", "groupby NaN keys", undefined, "python")).toBeUndefined();
+			expect(await kb.resolveArticle("pandas", "pandas groupby")).toBeUndefined();
+			expect(await kb.resolveArticle("pandas", "black and white bears")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Pandas",
+			);
+			expect(await kb.resolveArticle("devdocs_en_python/reference/frame", "")).toBe(
+				"devdocs_en_python_2026-08/reference/frame",
+			);
+			// A path in the wrong case is looked up as a title in its archive.
+			expect(await kb.resolveArticle("wikipedia_en-simple_all_nopic_2026-06/atlantic_ocean", "")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Atlantic_Ocean",
+			);
+			expect(await kb.resolveArticle("wikipedia_en-simple_all/atlantic_ocean", "")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Atlantic_Ocean",
+			);
+			expect(await kb.resolveArticle("somewhere/Atlantic_Ocean", "")).toBe(
+				"wikipedia_en-simple_all_nopic_2026-06/Atlantic_Ocean",
+			);
 		} finally {
 			kb.stop();
 		}

@@ -51,6 +51,8 @@ export interface KnowledgeBase {
 	search(query: string, limit: number, signal?: AbortSignal, shelf?: string): Promise<SearchResults>;
 	/** The article's HTML, or undefined when the archive has no such article. */
 	article(id: string, signal?: AbortSignal): Promise<string | undefined>;
+	/** The full id of an article named by its title or without its archive, or undefined when none matches. */
+	resolveArticle?(id: string, query: string, signal?: AbortSignal, shelf?: string): Promise<string | undefined>;
 }
 
 export interface KiwixKnowledgeBaseOptions {
@@ -58,6 +60,11 @@ export interface KiwixKnowledgeBaseOptions {
 	logFile: string;
 	fetch?: typeof fetch;
 	readyTimeoutMs?: number;
+}
+
+/** A title as the model may write it: any case, `_` for space. */
+function titleKey(title: string): string {
+	return title.replace(/_/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /** Most title lookups per archive for one search: the whole query and its first word pairs. */
@@ -335,8 +342,7 @@ export class KiwixKnowledgeBase implements KnowledgeBase {
 	 */
 	async search(query: string, limit: number, signal?: AbortSignal, shelf?: string): Promise<SearchResults> {
 		const origin = await this.start();
-		const named = this.shelves.find((candidate) => candidate.name === shelf?.trim().toLowerCase());
-		const shelves = named ? [named] : routeShelves(this.shelves, query);
+		const shelves = this.shelvesFor(query, shelf);
 		const names = new Set(shelves.flatMap((candidate) => candidate.books));
 		const books = (this.books ?? []).filter((book) => names.has(book.name));
 		if (books.length > 0) {
@@ -346,6 +352,12 @@ export class KiwixKnowledgeBase implements KnowledgeBase {
 			return { ...(await this.searchBooks(origin, query, limit, undefined, signal)), emptyShelf: label };
 		}
 		return this.searchBooks(origin, query, limit, undefined, signal);
+	}
+
+	/** The named shelf, or else the shelves the query's keywords point to; none means every archive. */
+	private shelvesFor(query: string, shelf: string | undefined): Shelf[] {
+		const named = this.shelves.find((candidate) => candidate.name === shelf?.trim().toLowerCase());
+		return named ? [named] : routeShelves(this.shelves, query);
 	}
 
 	/** Full text and titles, in the given archives or (undefined) all of them. */
@@ -421,6 +433,64 @@ export class KiwixKnowledgeBase implements KnowledgeBase {
 			.filter((hit) => !seen.has(hit.article) && seen.add(hit.article))
 			.slice(0, 2)
 			.map(({ covers: _, ...hit }) => hit);
+	}
+
+	/**
+	 * The full id of an article the model named the way small models do: by title (`Atlantic_Ocean`,
+	 * `pandas.Series.groupby`), by a path without its archive, or with the archive's date left off
+	 * (`devdocs_en_pandas/reference/frame`). A title must match exactly, ignoring case and `_` for space, so a near
+	 * miss is reported rather than swapped for another article. A title is looked up only on the named shelf, or else
+	 * the shelves the query points to, so "pandas" asked on the python shelf never opens Wikipedia's *Panda*.
+	 */
+	async resolveArticle(id: string, query: string, signal?: AbortSignal, shelf?: string): Promise<string | undefined> {
+		const origin = await this.start();
+		const books = this.books ?? [];
+		const cleaned = normalizeArticleId(id);
+		const slash = cleaned.indexOf("/");
+		const prefix = slash > 0 ? cleaned.slice(0, slash) : "";
+		const rest = cleaned.slice(slash + 1);
+		const named = books.find((book) => book.content === prefix) ?? books.find((book) => book.name === prefix);
+		if (named) {
+			const full = `${named.content}/${rest}`;
+			if (full !== cleaned && (await this.article(full, signal)) !== undefined) return full;
+			return this.titleLookup(origin, [named], rest, signal);
+		}
+		const shelves = this.shelvesFor(query, shelf);
+		const onShelves = new Set(shelves.flatMap((candidate) => candidate.books));
+		const ordered = shelves.length > 0 ? books.filter((book) => onShelves.has(book.name)) : books;
+		const lastPart = cleaned.slice(cleaned.lastIndexOf("/") + 1);
+		return (
+			(await this.titleLookup(origin, ordered, cleaned, signal)) ??
+			(lastPart !== cleaned ? this.titleLookup(origin, ordered, lastPart, signal) : undefined)
+		);
+	}
+
+	/** The id of the first article, in the order of `books`, whose title is exactly `title`. */
+	private async titleLookup(
+		origin: string,
+		books: CatalogBook[],
+		title: string,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		const wanted = titleKey(title);
+		if (!wanted) return undefined;
+		const found = await Promise.all(
+			books.map(async (book) => {
+				const params = new URLSearchParams({ content: book.content, term: title.replace(/_/g, " "), count: "5" });
+				try {
+					const response = await this.fetchFn(`${origin}/suggest?${params}`, { signal });
+					if (!response.ok) return undefined;
+					const entries = (await response.json()) as { value?: string; kind?: string; path?: string }[];
+					const entry = entries.find(
+						(e) => e.kind === "path" && e.path && e.value && titleKey(e.value) === wanted,
+					);
+					return entry?.path ? `${book.content}/${entry.path}` : undefined;
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		return found.find((id) => id !== undefined);
 	}
 
 	async article(id: string, signal?: AbortSignal): Promise<string | undefined> {

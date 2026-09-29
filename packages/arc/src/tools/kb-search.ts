@@ -48,11 +48,21 @@ export function createKbSearchTool(kb: KnowledgeBase, limits: ToolLimits): Agent
 			const shelf = "shelf" in args ? args.shelf : undefined;
 			const q = query.trim();
 			if (article?.trim()) {
-				const id = normalizeArticleId(article);
+				let id = normalizeArticleId(article);
 				onUpdate?.({ content: [{ type: "text", text: `Reading ${id}…` }] });
-				const html = await kb.article(id, signal);
+				let html = await kb.article(id, signal);
+				// Small models often pass the title from the results instead of the article id beneath it.
+				if (html === undefined && kb.resolveArticle) {
+					const resolved = await kb.resolveArticle(id, q, signal, shelf?.trim() || undefined);
+					if (resolved && resolved !== id) {
+						html = await kb.article(resolved, signal);
+						if (html !== undefined) id = resolved;
+					}
+				}
 				if (html === undefined) {
-					throw new Error(`No article "${id}" in the knowledge base. Use an article from kb_search results.`);
+					throw new Error(
+						`No article "${id}" in the knowledge base. Pass the article line from kb_search results, such as <archive>/<path>.`,
+					);
 				}
 				const { title, text } = articleText(html);
 				const passages = selectPassages(text, q || title, limits.maxBytes);
