@@ -219,6 +219,7 @@ shelves:
 - **Naming a shelf.** `kb_search` takes an optional `shelf`, and its definition lists the shelf names, about 30 tokens for ten shelves.
 - **Routing.** A search that names no shelf, or an unknown one, goes to the shelves whose keywords the query mentions most. Small models often leave the shelf out, and keywords catch those searches. A query that matches no keywords searches every archive.
 - **Falling back.** A shelf with no results searches every archive, and the result says so, so a wrong shelf costs one search, not the answer.
+- **Naming an article by its title.** Small models often pass `Atlantic_Ocean` or `pandas.Series.groupby` instead of the full article id. A read that fails looks the name up as an exact title (any case, `_` for space) on the search's shelf, or in every archive when the search has no shelf, and the result shows the full id.
 - **Checking the map.** `/rag on` reports the shelf count, an error in `shelves.yml`, and any shelf archive the folder lacks. The map is read when Arc starts, since the tool definition must not change within a session.
 
 ## Memory
