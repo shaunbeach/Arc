@@ -203,6 +203,24 @@ rag:
 - **Reading** an article returns only the parts that match the question: the opening paragraphs, then the best-matching sections, up to a fifth of the room in the context window (about 7,000 characters for a 20k window), without links, citation marks, info boxes, or reference lists. A whole Wikipedia article can hold 40,000 tokens; the result names the sections it left out, so the model can ask for one.
 - **Cost.** About 100 tokens per request while it is on (about 300 in chat mode with the web off, where the chat template adds its tool instructions), nothing while it is off. kiwix-serve starts with `/rag on`, takes about 70 MB, answers searches in a few hundredths of a second, and stops with `/rag off` or when Arc exits. Its output goes to `~/.arc/logs/kiwix-serve.log`.
 
+### Shelves
+
+A search of every archive lets the largest one crowd out the rest: "list comprehension" across Wikipedia and DevDocs returns Wikipedia articles that merely contain "comprehension". A `shelves.yml` in the archive folder groups the archives into shelves, so a search looks only where the answer is:
+
+```yaml
+shelves:
+  python:
+    books: [devdocs_en_python, devdocs_en_pandas]   # catalog names: the file name without its date
+    keywords: [pandas, dataframe, numpy]            # words that route a query here; the shelf name is one too
+  general:
+    books: [wikipedia_en-simple_all]
+```
+
+- **Naming a shelf.** `kb_search` takes an optional `shelf`, and its definition lists the shelf names, about 30 tokens for ten shelves.
+- **Routing.** A search that names no shelf, or an unknown one, goes to the shelves whose keywords the query mentions most. Small models often leave the shelf out, and keywords catch those searches. A query that matches no keywords searches every archive.
+- **Falling back.** A shelf with no results searches every archive, and the result says so, so a wrong shelf costs one search, not the answer.
+- **Checking the map.** `/rag on` reports the shelf count, an error in `shelves.yml`, and any shelf archive the folder lacks. The map is read when Arc starts, since the tool definition must not change within a session.
+
 ## Memory
 
 `/mempalace` links the current project to a wing of a local [MemPalace](https://github.com/mempalace/mempalace) (install with `uv tool install mempalace`). The wing defaults to the folder name, and the link is saved in `.arc/mempalace.json`, so run it once per project. From then on, each session's conversation is saved to that wing when it ends (on `/clear`, `/resume`, or exit), and the model gets a `memory` tool to search past sessions for earlier decisions and context. Embedding runs in the background, so a just-finished session is searchable a moment later.
