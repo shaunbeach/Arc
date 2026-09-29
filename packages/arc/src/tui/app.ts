@@ -39,7 +39,7 @@ import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
 import { isPonytailLevel, PONYTAIL_LEVEL_RULES, PONYTAIL_LEVELS } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
-import { KiwixKnowledgeBase } from "../rag/kiwix.ts";
+import { KiwixKnowledgeBase, SHELVES_FILE } from "../rag/kiwix.ts";
 import {
 	defaultWing,
 	palaceExists,
@@ -790,8 +790,24 @@ class InteractiveApp {
 		if (this.agent.model) this.session?.updateSettings(this.sessionSettings(this.agent.model));
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		if (rag) {
-			this.notice(style.gray(`Knowledge base on${note}: ${archives} archives the model can search with kb_search.`));
-			knowledgeBase.start().catch((error: unknown) => this.notice(style.red(`Knowledge base: ${errorText(error)}`)));
+			const shelves = knowledgeBase.shelves.length;
+			const onShelves = shelves > 0 ? ` on ${shelves} shelves` : "";
+			this.notice(
+				style.gray(
+					`Knowledge base on${note}: ${archives} archives${onShelves} the model can search with kb_search.`,
+				),
+			);
+			if (knowledgeBase.shelfError) {
+				this.notice(style.yellow(`No shelves: ${knowledgeBase.shelfError} Searches cover every archive.`));
+			}
+			knowledgeBase
+				.missingShelfBooks()
+				.then((missing) => {
+					if (missing.length > 0) {
+						this.notice(style.yellow(`${SHELVES_FILE} names archives the folder lacks: ${missing.join(", ")}.`));
+					}
+				})
+				.catch((error: unknown) => this.notice(style.red(`Knowledge base: ${errorText(error)}`)));
 		} else {
 			// A search in flight would fail if kiwix-serve went away under it; it stops with the app instead.
 			if (!this.agent.isRunning) knowledgeBase.stop();

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,9 +6,13 @@ import { articleText, selectPassages, topicWords } from "../src/rag/article.ts";
 import {
 	KiwixKnowledgeBase,
 	type KnowledgeBase,
+	loadShelves,
 	normalizeArticleId,
 	parseCatalog,
 	parseSearchXml,
+	parseShelves,
+	routeShelves,
+	type Shelf,
 } from "../src/rag/kiwix.ts";
 import { createKbSearchTool } from "../src/tools/kb-search.ts";
 import { toolLimitsFor } from "../src/tools/options.ts";
@@ -34,7 +38,11 @@ const SEARCH_XML = `<?xml version="1.0" encoding="UTF-8"?>
 const CATALOG_XML = `<feed>
   <entry>
     <title>PyTorch Docs</title>
+    <name>devdocs_en_pytorch</name>
     <link type="text/html" href="/content/devdocs_en_pytorch_2026-07" />
+    <author>
+      <name>DevDocs</name>
+    </author>
   </entry>
   <entry>
     <title>Wikipedia in simple English</title>
@@ -61,10 +69,15 @@ describe("kiwix replies", () => {
 		});
 	});
 
-	it("maps each archive to its title", () => {
-		expect([...parseCatalog(CATALOG_XML)]).toEqual([
-			["devdocs_en_pytorch_2026-07", "PyTorch Docs"],
-			["wikipedia_en-simple_all_nopic_2026-06", "Wikipedia in simple English"],
+	it("lists each archive's path, own name, and title", () => {
+		expect(parseCatalog(CATALOG_XML)).toEqual([
+			{ content: "devdocs_en_pytorch_2026-07", name: "devdocs_en_pytorch", title: "PyTorch Docs" },
+			// No <name>: the path stands in.
+			{
+				content: "wikipedia_en-simple_all_nopic_2026-06",
+				name: "wikipedia_en-simple_all_nopic_2026-06",
+				title: "Wikipedia in simple English",
+			},
 		]);
 	});
 
@@ -86,6 +99,63 @@ describe("kiwix replies", () => {
 			"atlantic",
 			"ocean",
 		]);
+	});
+});
+
+const SHELVES_YML = `shelves:
+  python:
+    about: Python and its data libraries.
+    books: [devdocs_en_python, devdocs_en_pandas]
+    keywords: [pandas, DataFrame, list comprehension]
+  systems:
+    books: [devdocs_en_cpp, devdocs_en_rust]
+    keywords: [c++, rust, std]
+  general:
+    books: [wikipedia_en-simple_all]
+`;
+
+describe("shelves", () => {
+	const shelves = parseShelves(SHELVES_YML);
+	const route = (query: string) => routeShelves(shelves, query).map((shelf) => shelf.name);
+
+	it("reads each shelf's books and lowercase keywords, with its name as a keyword", () => {
+		expect(shelves).toEqual([
+			{
+				name: "python",
+				books: ["devdocs_en_python", "devdocs_en_pandas"],
+				keywords: ["python", "pandas", "dataframe", "list comprehension"],
+			},
+			{ name: "systems", books: ["devdocs_en_cpp", "devdocs_en_rust"], keywords: ["systems", "c++", "rust", "std"] },
+			{ name: "general", books: ["wikipedia_en-simple_all"], keywords: ["general"] },
+		]);
+	});
+
+	it("says what is wrong with a map it cannot use", () => {
+		expect(() => parseShelves("books: [a]")).toThrow("needs a `shelves:` mapping");
+		expect(() => parseShelves("shelves:\n  Web Stuff:\n    books: [a]")).toThrow('shelf "Web Stuff"');
+		expect(() => parseShelves("shelves:\n  web:\n    keywords: [js]")).toThrow("shelves.web.books names no archives");
+		expect(() => parseShelves("shelves:\n  web:\n    books: a")).toThrow("shelves.web.books must be a list");
+	});
+
+	it("loads the folder's shelves.yml, and treats a missing one as no shelves", () => {
+		const dir = mkdtempSync(join(tmpdir(), "arc-shelves-"));
+		expect(loadShelves(dir)).toEqual({ shelves: [] });
+		writeFileSync(join(dir, "shelves.yml"), "shelves: [");
+		const broken = loadShelves(dir);
+		expect(broken.shelves).toEqual([]);
+		expect(broken.error).toContain(join(dir, "shelves.yml"));
+		writeFileSync(join(dir, "shelves.yml"), SHELVES_YML);
+		expect(loadShelves(dir).shelves.map((shelf) => shelf.name)).toEqual(["python", "systems", "general"]);
+	});
+
+	it("routes a query to the shelf whose keywords it mentions most", () => {
+		expect(route("pandas DataFrame merge on two columns")).toEqual(["python"]);
+		expect(route("What does a list comprehension return?")).toEqual(["python"]);
+		expect(route("std::vector reserve vs resize in C++")).toEqual(["systems"]);
+		expect(route("Rust iterators, Python generators")).toEqual(["python", "systems"]);
+		expect(route("deepest point of the atlantic ocean")).toEqual([]);
+		// Whole words only: "rusty" is not "rust".
+		expect(route("rusty nails")).toEqual([]);
 	});
 });
 
@@ -144,6 +214,56 @@ describe("selectPassages", () => {
 		expect(text).toContain("The lead paragraph");
 		expect(text).toContain("## History");
 		expect(text).not.toContain("## Bell tests");
+	});
+});
+
+describe("kb_search with shelves", () => {
+	const shelves: Shelf[] = [
+		{ name: "python", books: ["devdocs_en_python"], keywords: ["python"] },
+		{ name: "general", books: ["wikipedia_en-simple_all"], keywords: ["general"] },
+	];
+	const calls: (string | undefined)[] = [];
+	const kb: KnowledgeBase = {
+		shelves,
+		search: async (query, _limit, _signal, shelf) => {
+			calls.push(shelf);
+			const hits = [{ title: "5. Data Structures", book: "Python Docs", article: "py/ds", snippet: "" }];
+			if (query === "routed") return { total: 1, hits, shelf: "python" };
+			if (query === "empty shelf") return { total: 1, hits, emptyShelf: "python" };
+			if (query === "nothing") return { total: 0, hits: [], emptyShelf: "python" };
+			return { total: 1, hits };
+		},
+		article: async () => undefined,
+	};
+	const tool = createKbSearchTool(kb, toolLimitsFor(20_000, 8192));
+	const run = async (args: { query: string; shelf?: string }) => {
+		const result = await tool.execute("id", args);
+		const [first] = result.content;
+		return first.type === "text" ? first.text : "";
+	};
+
+	it("offers the shelf names in its parameters", () => {
+		expect(JSON.stringify(tool.parameters)).toContain("Limit search to one of: python, general");
+		const plain = createKbSearchTool({ ...kb, shelves: [] }, toolLimitsFor(20_000, 8192));
+		expect(JSON.stringify(plain.parameters)).not.toContain("shelf");
+	});
+
+	it("passes the shelf on and says which one it searched", async () => {
+		expect(await run({ query: "routed", shelf: " python " })).toContain(
+			'Knowledge base results for "routed" on shelf python:',
+		);
+		expect(calls.at(-1)).toBe("python");
+		await run({ query: "routed", shelf: "  " });
+		expect(calls.at(-1)).toBeUndefined();
+	});
+
+	it("names the shelves after a search of every archive, and says when a shelf came up empty", async () => {
+		const everywhere = await run({ query: "anything" });
+		expect(everywhere).toContain("Narrow a search with shelf: python, general.");
+		expect(await run({ query: "empty shelf" })).toMatch(/^Nothing on shelf python; searched every shelf\. /);
+		expect(await run({ query: "nothing" })).toBe(
+			'Nothing on shelf python; searched every shelf. Nothing in the knowledge base matches "nothing".',
+		);
 	});
 });
 
@@ -207,6 +327,70 @@ describe("KiwixKnowledgeBase", () => {
 		writeFileSync(join(dir, "empty", "b.zim"), "");
 		writeFileSync(join(dir, "empty", "a.ZIM"), "");
 		expect(empty.archives()).toEqual(["a.ZIM", "b.zim"]);
+	});
+
+	it("searches only a shelf's archives, and every archive when the shelf has nothing", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "arc-rag-"));
+		writeFileSync(join(dir, "a.zim"), "");
+		writeFileSync(join(dir, "shelves.yml"), SHELVES_YML);
+		// Stands in for kiwix-serve, which the fake fetch below answers for.
+		const server = join(dir, "fake-kiwix-serve");
+		writeFileSync(server, "#!/bin/sh\nexec sleep 30\n");
+		chmodSync(server, 0o755);
+		const catalog = `<feed>${[
+			["devdocs_en_python", "devdocs_en_python_2026-08"],
+			["devdocs_en_cpp", "devdocs_en_cpp_2026-07"],
+			["wikipedia_en-simple_all", "wikipedia_en-simple_all_nopic_2026-06"],
+		]
+			.map(
+				([name, content]) =>
+					`<entry><title>${name}</title><name>${name}</name><link href="/content/${content}" /></entry>`,
+			)
+			.join("")}</feed>`;
+		const searches: string[][] = [];
+		const suggested = new Set<string>();
+		const fakeFetch = (async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			if (url.pathname.startsWith("/catalog")) return new Response(catalog);
+			if (url.pathname === "/suggest") {
+				suggested.add(url.searchParams.get("content") ?? "");
+				return new Response("[]");
+			}
+			const books = url.searchParams.getAll("books.name");
+			searches.push(books);
+			const found = books.length === 0 || url.searchParams.get("pattern") !== "zebra";
+			return new Response(
+				found
+					? `<rss><opensearch:totalResults>1</opensearch:totalResults><item><title>Hit</title><link>/content/x/y</link><book><title>B</title></book></item></rss>`
+					: "<rss><opensearch:totalResults>0</opensearch:totalResults></rss>",
+			);
+		}) as typeof fetch;
+		const kb = new KiwixKnowledgeBase(
+			{ folder: dir, kiwixServe: server },
+			{ logFile: join(dir, "kiwix.log"), fetch: fakeFetch },
+		);
+		try {
+			expect(kb.shelves.map((shelf) => shelf.name)).toEqual(["python", "systems", "general"]);
+			expect(await kb.missingShelfBooks()).toEqual(["python/devdocs_en_pandas", "systems/devdocs_en_rust"]);
+
+			expect((await kb.search("pandas groupby", 5)).shelf).toBe("python");
+			expect(searches.at(-1)).toEqual(["devdocs_en_python_2026-08"]);
+			expect([...suggested]).toEqual(["devdocs_en_python_2026-08"]);
+
+			expect((await kb.search("anything", 5, undefined, "Systems")).shelf).toBe("systems");
+			expect(searches.at(-1)).toEqual(["devdocs_en_cpp_2026-07"]);
+
+			// An unknown shelf is routed by keywords like no shelf at all.
+			const unrouted = await kb.search("atlantic ocean", 5, undefined, "geography");
+			expect(unrouted.shelf).toBeUndefined();
+			expect(searches.at(-1)).toEqual([]);
+
+			const fellBack = await kb.search("zebra", 5, undefined, "python");
+			expect(fellBack).toMatchObject({ emptyShelf: "python", total: 1 });
+			expect(searches.slice(-2)).toEqual([["devdocs_en_python_2026-08"], []]);
+		} finally {
+			kb.stop();
+		}
 	});
 
 	it("says how to fix a missing kiwix-serve", async () => {

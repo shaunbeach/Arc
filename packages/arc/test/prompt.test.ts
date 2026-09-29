@@ -69,6 +69,18 @@ describe("system prompt", () => {
 		const rag = buildSystemPrompt({ cwd: "/work/project", platform: "darwin", rag: true });
 		const added = estimateFixedPromptTokens(rag, withKb) - estimateFixedPromptTokens(systemPrompt, tools);
 		expect(added).toBeLessThan(150);
+
+		// Ten shelves, as in a full shelves.yml, add their names to kb_search's definition.
+		const names = ["python", "web", "systems", "db", "ops", "stats", "math", "physics", "interview", "general"];
+		const shelves = names.map((name) => ({ name, books: [name], keywords: [name] }));
+		const withShelves = createCodingTools({
+			cwd: "/work/project",
+			limits: toolLimitsFor(12_000),
+			acceptsImages: false,
+			knowledgeBase: { ...knowledgeBase, shelves },
+		});
+		const shelfCost = estimateFixedPromptTokens(rag, withShelves) - estimateFixedPromptTokens(rag, withKb);
+		expect(shelfCost).toBeLessThan(60);
 	});
 
 	it("adds the ponytail rules only while ponytail is on, for under 300 more tokens", () => {
