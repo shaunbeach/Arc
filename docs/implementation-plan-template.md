@@ -19,6 +19,7 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 - One concern per phase, at most about 8 tasks, and a list of the files it may create or change. A phase should fit comfortably in a 20k-token window together with the files it reads.
 - Order phases so each one builds on verified work: types, then plumbing, then wiring, then UI, then features, then final checks.
 - Put exact values in the plan (names, paths, strings, numbers), not "something like".
+- Give each phase an **Interfaces** line: what it uses from earlier phases and what later phases will use from it, with exact names and types (`loadConfig(path: string): Config` in `src/config.ts`). The actor sees only its own phase, so this line is how it learns the names its neighbors use.
 - End each phase's tasks with **Done when** bullets: short, checkable statements of what is true when the phase is finished. The critic checks them one by one, so they are the phase's acceptance criteria. Anything a command can check belongs in `verify` too.
 
 **Checks (the `verify` block):**
@@ -39,6 +40,13 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 **Manual steps:**
 
 - Anything a person must do (click in a window, watch output, test against a live service) goes in a **Manual checks** list after the `verify` block. The critic judges those from the code; a person runs them after the whole plan passes.
+
+**Check the finished plan before handing it over:**
+
+- Every section of the spec has a phase that builds it. List any that do not, and add the phase.
+- Each name, path, and type is spelled the same in every phase that mentions it. A function called `clearLayers()` in one phase and `clearAllLayers()` in another is a bug the actor will faithfully build.
+- Each phase's Interfaces line matches what the earlier phases it names actually provide.
+- The plan is shorter than the code it describes. Where code blocks make up most of a phase, replace bodies with signatures, file paths, and the values the spec fixes.
 
 **Setup the plan must state:**
 
@@ -69,6 +77,7 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 **Spec:** §<n>
 **Files (create or change only these):** `package.json`, `<config files>`, `src/main/index.ts`, ...
 **Fixed choices:** <module system, output paths and file names, dev server port with strictPort>
+**Interfaces:** uses nothing earlier. Provides: <exact names later phases use, e.g. `npm run build` writes `out/main/index.js`>
 
 - [ ] <task with exact names, paths, and values>
 - [ ] <task>
@@ -81,8 +90,8 @@ The plan is executed unattended: an actor model builds one phase at a time with 
 ```verify
 npm run typecheck
 npm run build && test -f <exact output path 1> && test -f <exact output path 2>
-# Startup check: start the app in the background, fetch its page, stop it, pass only on HTTP 200.
-(npm run dev > /tmp/dev.log 2>&1 &); sleep 20; code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/); pkill -f "$PWD/node_modules/electron"; pkill -f electron-vite; test "$code" = 200
+# Startup check: start the app in the background, poll its page for up to 60 s, stop it, pass only on HTTP 200.
+(npm run dev > /tmp/dev.log 2>&1 &); for i in $(seq 60); do code=$(curl -s -m 2 -o /dev/null -w "%{http_code}" http://localhost:5173/); test "$code" = 200 && break; sleep 1; done; pkill -f "$PWD/node_modules/electron"; pkill -f electron-vite; test "$code" = 200
 ```
 
 **Manual checks (a person, after the plan passes):**
@@ -95,6 +104,7 @@ npm run build && test -f <exact output path 1> && test -f <exact output path 2>
 **Goal:** ...
 **Spec:** §...
 **Files (create or change only these):** ...
+**Interfaces:** uses <exact names and signatures from earlier phases>. Provides: <exact names and signatures later phases use>
 
 - [ ] ...
 
@@ -126,7 +136,7 @@ test "$(grep -c '<exact required string>' <file>)" = 1
 ```verify
 npm run typecheck
 npm run build
-(npm run dev > /tmp/dev.log 2>&1 &); sleep 20; code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/); pkill -f "$PWD/node_modules/electron"; pkill -f electron-vite; test "$code" = 200
+(npm run dev > /tmp/dev.log 2>&1 &); for i in $(seq 60); do code=$(curl -s -m 2 -o /dev/null -w "%{http_code}" http://localhost:5173/); test "$code" = 200 && break; sleep 1; done; pkill -f "$PWD/node_modules/electron"; pkill -f electron-vite; test "$code" = 200
 ```
 
 **Manual checks (a person, after the plan passes):**
@@ -139,7 +149,7 @@ npm run build
 <optional diagram; this heading ends the last phase>
 ````
 
-The startup check above is for an Electron and Vite app on port 5173. For other stacks, keep its shape: start in the background, wait, probe, stop, and test the result. For a CLI, run it with a sample input and compare the output instead.
+The startup check above is for an Electron and Vite app on port 5173. For other stacks, keep its shape: start in the background, poll until it answers or the limit passes, stop, and test the result. Poll rather than `sleep 20`: a fixed wait fails when the app is slow and wastes time when it is quick. For a CLI, run it with a sample input and compare the output instead.
 
 ## Before `/supervise`
 
