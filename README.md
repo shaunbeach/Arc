@@ -136,6 +136,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/mode [thinking\|instruct]` | Switch sampling mode. Without an argument, toggles. |
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
+| `/sandbox [on\|net\|off]` | Limit what bash may write and reach. Without an argument, shows the current limits. See [Sandbox](#sandbox). |
 | `/rag [on\|off]` | Let the model search your offline knowledge base. Without an argument, toggles. See [Knowledge base](#knowledge-base). |
 | `/mempalace [wing]` | Save this project's sessions to MemPalace and let the model search them. See [Memory](#memory). |
 | `/ponytail [off\|lite\|full\|ultra]` | Steer the model to the smallest code that works. Without an argument, pick a level. See [Ponytail](#ponytail). |
@@ -148,6 +149,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/supervise [plan.md\|resume\|stop\|report\|reload\|check plan.md]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase; `reload` adopts a plan you changed and committed; `check` looks a plan over before a run. See [Supervisor](#supervisor). |
 | `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
 | `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
+| `/test [eval\|workbench\|all] [quick]` | Benchmark the loaded model with your test suites; `/test stop` ends a run. See [Testing models](#testing-models). |
 | `/quit` | Exit. |
 
 | Key | Effect |
@@ -188,6 +190,45 @@ Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_se
 - In plan and chat modes, where the web tools are all the model has, `web_fetch` refuses loopback and private addresses, including through redirects, so a page cannot steer the model into your local network. Agent mode reaches them, as bash could anyway.
 
 `ARC_WEB_TIMEOUT_MS` changes the request timeout (30 s for pages, 20 s for searches). `/web off` removes both tools and every mention of them from the prompt.
+
+## Sandbox
+
+The sandbox is off by default; turn it on with `/sandbox on` or `level: on` in `models.yml`. On macOS, while it is active (`on` or `net`), every command the model runs through bash, and every supervisor check, runs inside Seatbelt, the sandbox built into macOS. The limits hold for everything the command starts, so `bash -c`, `pip`, or a script cannot step outside them.
+
+| Level | Writes | Network |
+|---|---|---|
+| `on` | the project, temp folders, and caches | localhost only |
+| `net` | the project, temp folders, and caches | anywhere |
+| `off` (default) | anywhere | anywhere |
+
+- **The project** is the git repository the working directory is in, or the working directory when it is not in one, so a session started in a subfolder can still commit.
+- **Caches** are `~/Library/Caches`, `~/.cache`, `~/.npm`, and `~/.matplotlib`, where package managers and compilers write whether or not they download anything.
+- **Localhost** stays reachable at `on`, so tests can start a dev server and call it.
+- **Also blocked:** AppleEvents, so `osascript` cannot ask Finder to delete a file, and `open`, which would start apps and browsers outside the sandbox. The model is told to give you the file's path instead, so open charts and other files yourself.
+- **When a command is blocked**, the result tells the model so, and not to retry or look for another way, since small models otherwise read "Could not resolve host" as a flaky network.
+- **Not covered:** `web_search` and `web_fetch` run inside Arc, not through bash; `/web off` removes them. The sandbox also limits where commands write, not how much: see below for a cap.
+
+`/sandbox on` to confine a project, `/sandbox net` for a task that installs packages. The footer shows `[sandbox: on]` or `[sandbox: net]` while the sandbox is active. The level is not saved with the session: each start takes it from `models.yml`, off unless it sets a level, so set `level: on` there before an unattended overnight run.
+
+```yaml
+sandbox:
+  level: on            # on, net, or off at start (default: off)
+  writable:            # more folders commands may write
+    - ~/Documents/shared-data
+```
+
+### Capping disk use overnight
+
+A model can still fill the disk inside the project. For a hard cap, run the project from a disk image of fixed size and let only it and temp folders be written:
+
+```bash
+hdiutil create -size 10g -fs APFS -type SPARSE -volname arcjob ~/arcjob.sparseimage
+hdiutil attach ~/arcjob.sparseimage        # mounts at /Volumes/arcjob
+git clone ~/Documents/myproject /Volumes/arcjob/myproject
+cd /Volumes/arcjob/myproject && arc
+```
+
+The image takes only the space used. At 10 GB, writes fail with "No space left on device": the command fails, a supervised phase fails, and the main disk stays free.
 
 ## Knowledge base
 
@@ -275,7 +316,7 @@ For each phase:
 5. A loop guard watches the actor. If it makes the same tool call 3 times among its last 5, or one turn runs past `attemptMinutes`, Arc ends the turn and checks the phase right away. On a fail, the actor is told why it was stopped.
 6. After `maxRetries` fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries back.
 
-The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit.
+The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit. The checks run in the [sandbox](#sandbox), at the level in effect when they run.
 
 The run cannot be talked into passing. It reads its phases and checks from the plan as committed when it started, not from the file, and a phase fails without running its checks if it:
 
@@ -290,6 +331,23 @@ If the project has an `AGENTS.md`, every phase brief includes it (up to about 3,
 `/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out. The saved file also has what the run ran on (models, settings, Arc and llama.cpp versions, memory), each phase's files and lines changed, tool calls and failures, trims, loop-guard stops, your hints, the actor's reading and writing time, every failed try with its reasons, model load times, and peak swap.
 
 Every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
+
+## Testing models
+
+`/test` runs model benchmarks on the loaded model: an `Eval/` suite (tool calling, long-context recall, writing discipline, speed, coding through Arc) and a `Work_Bench/` suite (everyday document, data, and file work). They sit in one folder, named in `models.yml`:
+
+```yaml
+tests:
+  folder: ~/Documents/Test_Suite
+```
+
+- `/test eval`, `/test workbench`, or `/test all` runs the full suites; add `quick` for a short sanity check (`/test all quick`).
+- The suites grade the model; the model does not run them, so a weak model cannot misreport its own score.
+- The model stays loaded and both suites use its server. `/test all` restarts llama-server between the suites, since a long run leaves much of its memory in swap. Pick the model and mode first with `/model` and `/mode`: Eval tests in that mode.
+- Both suites know every model in `models.yml`, so a new model needs no second entry anywhere. Work_Bench is pointed at the server Arc runs, including a `discover` entry's.
+- Each result line shows in the transcript and the status line counts passes and fails. When a suite finishes, its HTML report opens in the browser and a notification says so.
+- Esc or `/test stop` ends a run. Running the same Eval again that day continues where it stopped; `/test workbench resume` continues a Work_Bench run.
+- Messages typed during a run are sent when it ends.
 
 ## Hosting
 
@@ -331,7 +389,7 @@ packages/arc          the app
   src/config/          models.yml loader, sampling presets
   src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor, /props discovery
   src/agent/           agent loop
-  src/tools/           read, edit, write, bash, web_search, web_fetch, kb_search
+  src/tools/           read, edit, write, bash, web_search, web_fetch, kb_search, and the sandbox bash runs in
   src/rag/             kiwix-serve, and cutting articles down to the parts that match
   src/context.ts       context window trimming
   src/work-log.ts      the work log sent with trimmed tasks

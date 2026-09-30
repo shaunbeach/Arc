@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { runShellCommand } from "../tools/child-process.ts";
 import type { ToolLimits } from "../tools/options.ts";
 import { OutputBuffer } from "../tools/output-buffer.ts";
+import { sandboxNote } from "../tools/sandbox.ts";
 
 /** Each check's output is cut to its end, about 2k tokens: the actor reads it in a 20k window after a failure. */
 export const CHECK_OUTPUT_LIMITS: ToolLimits = { maxLines: 200, maxBytes: 6 * 1024 };
@@ -75,6 +76,8 @@ export async function runChecks(
 		if (snapshot.truncation.truncated && snapshot.fullOutputPath) {
 			text = `[Last ${snapshot.truncation.outputLines} of ${snapshot.truncation.totalLines} lines. Full output: ${snapshot.fullOutputPath}]\n${text}`;
 		}
+		const note = sandboxNote(text);
+		if (note) text = `${text}\n${note}`;
 		const check: CheckResult = {
 			command,
 			exitCode: result.exitCode,

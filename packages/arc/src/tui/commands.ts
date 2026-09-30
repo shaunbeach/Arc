@@ -2,12 +2,14 @@ import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { LiteModel } from "../config/models.ts";
 import { isSamplingMode, SAMPLING_MODES, type SamplingMode } from "../config/sampling.ts";
 import { PONYTAIL_LEVELS } from "../ponytail.ts";
+import { SANDBOX_LEVELS } from "../tools/sandbox.ts";
 
 export type CommandName =
 	| "agent"
 	| "plan"
 	| "chat"
 	| "web"
+	| "sandbox"
 	| "rag"
 	| "mempalace"
 	| "ponytail"
@@ -22,6 +24,7 @@ export type CommandName =
 	| "supervise"
 	| "audit"
 	| "usage"
+	| "test"
 	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
@@ -29,6 +32,11 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	{ name: "plan", description: "Switch to plan mode (design & planning, read-only tools)" },
 	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
 	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
+	{
+		name: "sandbox",
+		description: "Limit what bash may write and reach: on, net (internet allowed), or off",
+		argumentHint: "[on|net|off]",
+	},
 	{ name: "rag", description: "Let the model search the offline knowledge base", argumentHint: "[on|off]" },
 	{
 		name: "mempalace",
@@ -63,6 +71,11 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	},
 	{ name: "audit", description: "Check and judge the current supervised phase now", argumentHint: "[critic]" },
 	{ name: "usage", description: "Show the tokens this session used, in and out" },
+	{
+		name: "test",
+		description: "Benchmark the loaded model with the test suites in models.yml",
+		argumentHint: "[eval|workbench|all] [quick] | stop",
+	},
 	{ name: "quit", description: "Exit" },
 ];
 
@@ -116,8 +129,10 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		mode: complete(SAMPLING_MODES),
 		web: complete(["on", "off"]),
 		rag: complete(["on", "off"]),
+		sandbox: complete(SANDBOX_LEVELS),
 		ponytail: complete(PONYTAIL_LEVELS),
 		supervise: complete(["resume", "stop", "report", "reload", "check"]),
+		test: complete(["eval", "workbench", "all", "eval quick", "workbench quick", "all quick", "stop"]),
 		audit: complete(models.filter((model) => !model.discover).map((model) => model.name)),
 	};
 	return COMMANDS.map((command) => ({

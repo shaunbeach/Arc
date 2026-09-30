@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { currentSandbox, sandboxedSpawn } from "./sandbox.ts";
 
 const SHELL = existsSync("/bin/bash") ? "/bin/bash" : "sh";
 /** How long to keep reading after exit while a detached descendant still holds the output pipes. */
@@ -88,12 +89,15 @@ function recordLeftover(pid: number): void {
 
 /**
  * Run a command with bash (or sh) in its own process group, so a timeout or abort kills everything it started.
- * Stdin is closed and pagers are disabled, so commands cannot wait for input that never comes.
+ * Stdin is closed and pagers are disabled, so commands cannot wait for input that never comes. Under a sandbox
+ * (`setSandbox`), bash runs inside Seatbelt, and everything it starts inherits the limits.
  */
 export async function runShellCommand(command: string, cwd: string, options: ShellRunOptions): Promise<ShellRunResult> {
 	const { signal, timeoutMs, onData } = options;
 	signal?.throwIfAborted();
-	const child = spawn(SHELL, ["-c", command], {
+	const policy = currentSandbox();
+	const { file, args } = policy ? sandboxedSpawn(SHELL, command, policy) : { file: SHELL, args: ["-c", command] };
+	const child = spawn(file, args, {
 		cwd,
 		detached: true,
 		env: { ...process.env, PAGER: "cat", GIT_PAGER: "cat" },

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { RagConfig } from "../rag/kiwix.ts";
+import { isSandboxLevel, SANDBOX_LEVELS, type SandboxConfig } from "../tools/sandbox.ts";
 import { expandHome, getAppDir } from "./paths.ts";
 import {
 	isSamplingMode,
@@ -73,6 +74,15 @@ export interface ModelsConfig {
 	rag?: RagConfig;
 	/** `/supervise` settings, when models.yml has a `supervisor:` section. */
 	supervisor?: SupervisorConfig;
+	/** The test suites `/test` runs, when models.yml has a `tests:` section. */
+	tests?: TestsConfig;
+	/** Limits on bash and checks, when models.yml has a `sandbox:` section. Without one, the sandbox is off. */
+	sandbox?: SandboxConfig;
+}
+
+export interface TestsConfig {
+	/** Absolute folder holding the suites: `Eval/` and `Work_Bench/`. */
+	folder: string;
 }
 
 export interface SupervisorConfig {
@@ -161,8 +171,8 @@ export function hasFlag(args: readonly string[], flags: readonly string[]): bool
 }
 
 /**
- * Parse models.yml. Only `providers:` and `rag:` are read; other top-level keys (such as another tool's `ask:` block)
- * are ignored. Errors name the file and the offending key.
+ * Parse models.yml. Only `providers:`, `rag:`, `supervisor:`, `tests:`, and `sandbox:` are read; other top-level
+ * keys (such as another tool's `ask:` block) are ignored. Errors name the file and the offending key.
  */
 export function parseModelsConfig(text: string, path: string, options: ParseModelsOptions = {}): ModelsConfig {
 	const env = options.env ?? process.env;
@@ -430,7 +440,39 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 			attemptMinutes: readPositiveInt(root.supervisor, "attemptMinutes", "supervisor") ?? 90,
 		};
 	}
-	return { path, models, warnings, ...(rag ? { rag } : {}), ...(supervisor ? { supervisor } : {}) };
+	// `tests:` names the folder of test suites `/test` runs.
+	let tests: TestsConfig | undefined;
+	if (root.tests !== undefined) {
+		if (!isRecord(root.tests)) throw configError("tests", "must be a mapping");
+		const folder = readString(root.tests, "folder", "tests");
+		if (!folder) throw configError("tests.folder", "is required");
+		tests = { folder: resolve(configDir, expandHome(folder)) };
+		if (!existsSync(tests.folder)) warnings.push(`tests.folder not found: ${tests.folder}`);
+	}
+	// `sandbox:` sets the level bash starts at and adds folders it may write.
+	let sandbox: SandboxConfig | undefined;
+	if (root.sandbox !== undefined) {
+		if (!isRecord(root.sandbox)) throw configError("sandbox", "must be a mapping");
+		// YAML reads a bare on/off as a boolean.
+		const raw = root.sandbox.level;
+		const level = raw === true ? "on" : raw === false ? "off" : raw === undefined ? "off" : raw;
+		if (typeof level !== "string" || !isSandboxLevel(level)) {
+			throw configError("sandbox.level", `must be one of ${SANDBOX_LEVELS.join(", ")}`);
+		}
+		const writable = (readStringList(root.sandbox, "writable", "sandbox") ?? []).map((folder) =>
+			resolve(configDir, expandHome(folder)),
+		);
+		sandbox = { level, writable };
+	}
+	return {
+		path,
+		models,
+		warnings,
+		...(rag ? { rag } : {}),
+		...(supervisor ? { supervisor } : {}),
+		...(tests ? { tests } : {}),
+		...(sandbox ? { sandbox } : {}),
+	};
 }
 
 /** Exact name or id, then case-insensitive name, then a unique case-insensitive substring of a name. */

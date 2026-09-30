@@ -17,6 +17,7 @@ import type { AssistantMessage, ToolCall } from "../llm/types.ts";
 import type { PonytailLevel } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
 import type { SupervisorState } from "../supervisor/supervisor.ts";
+import type { SandboxLevel } from "../tools/sandbox.ts";
 import { accent, renderLogo } from "./logo.ts";
 import { markdownTheme, style } from "./theme.ts";
 
@@ -523,6 +524,8 @@ export interface FooterState {
 	web?: boolean;
 	/** True after `/rag on`. */
 	rag?: boolean;
+	/** The `/sandbox` level; undefined where there is no sandbox. */
+	sandbox?: SandboxLevel;
 	/** The `/ponytail` level. */
 	ponytail?: PonytailLevel;
 	/** The session's `/supervise` loop, if any. */
@@ -583,6 +586,8 @@ export function formatFooter(state: FooterState): string {
 			parts.push(style.yellow(`[${state.interactionMode}]`));
 		}
 		if (state.web === false) parts.push(style.yellow("[no web]"));
+		// Only an active sandbox shows: `off` is the default.
+		if (state.sandbox === "on" || state.sandbox === "net") parts.push(style.yellow(`[sandbox: ${state.sandbox}]`));
 		if (state.rag) parts.push(style.cyan("[rag]"));
 		if (state.ponytail && state.ponytail !== "off")
 			parts.push(style.magenta(`[P:${state.ponytail[0].toUpperCase()}${state.ponytail.slice(1)}]`));

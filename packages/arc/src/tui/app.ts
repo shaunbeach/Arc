@@ -76,8 +76,17 @@ import {
 	type SupervisorState,
 	startState,
 } from "../supervisor/supervisor.ts";
+import { openReport, parseTestArgs, progressIn, runSuite, type SuiteCommand, suiteCommand } from "../test-suite.ts";
 import { killLeftoverProcesses, setLeftoverLimit } from "../tools/child-process.ts";
 import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
+import {
+	currentSandbox,
+	isSandboxLevel,
+	type SandboxLevel,
+	sandboxAvailable,
+	sandboxPolicy,
+	setSandbox,
+} from "../tools/sandbox.ts";
 import { formatUsage, tallyUsage } from "../usage.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
 import {
@@ -212,6 +221,8 @@ class InteractiveApp {
 	private supervisor: Supervisor | undefined;
 	/** The running `/supervise` loop; esc stops it. */
 	private supervisorRun: AbortController | undefined;
+	/** A running `/test`; esc or `/test stop` ends it. */
+	private testRun: AbortController | undefined;
 	/** A critic named with `/audit <model>`, used instead of models.yml's until the loop stops. */
 	private criticOverride: string | undefined;
 	/** Serializes llama-server startups, so a model switch and a prompt never start two servers. */
@@ -318,7 +329,8 @@ class InteractiveApp {
 			this.serverStart !== undefined ||
 			this.swapCooldown !== undefined ||
 			this.compactRun !== undefined ||
-			this.supervisorRun !== undefined;
+			this.supervisorRun !== undefined ||
+			this.testRun !== undefined;
 		if (matchesAction(data, "abort") && working) {
 			this.abort();
 			return { consume: true };
@@ -374,6 +386,7 @@ class InteractiveApp {
 		this.swapCooldown?.abort();
 		this.compactRun?.abort();
 		this.supervisorRun?.abort();
+		this.testRun?.abort();
 		this.serveAbortController?.abort();
 		this.swapMonitor?.stop();
 		this.swapMonitor = undefined;
@@ -614,6 +627,9 @@ class InteractiveApp {
 			case "web":
 				this.switchWeb(args);
 				return;
+			case "sandbox":
+				this.switchSandbox(args);
+				return;
 			case "rag":
 				this.switchRag(args);
 				return;
@@ -658,6 +674,9 @@ class InteractiveApp {
 				return;
 			case "usage":
 				this.showUsage();
+				return;
+			case "test":
+				void this.testCommand(args);
 				return;
 			case "quit":
 				this.stop();
@@ -750,6 +769,39 @@ class InteractiveApp {
 		this.notice(
 			style.gray(web ? `Web tools on${note}.` : `Web tools off${note}: the model cannot search or fetch pages.`),
 		);
+		this.updateFooter();
+	}
+
+	/**
+	 * `/sandbox on|net|off`, or `/sandbox` to show what bash may do. Applies from the next command, including the
+	 * supervisor's checks. Not saved with the session: each start takes the level from models.yml, so an `off` meant
+	 * for one task does not carry into an overnight run.
+	 */
+	private switchSandbox(arg: string): void {
+		if (!sandboxAvailable()) {
+			this.notice(style.yellow("The sandbox needs macOS: /usr/bin/sandbox-exec is missing."));
+			return;
+		}
+		const choice = arg.trim().toLowerCase();
+		if (choice && !isSandboxLevel(choice)) {
+			this.notice(style.yellow("Use /sandbox on, /sandbox net, or /sandbox off."));
+			return;
+		}
+		const policy = choice
+			? sandboxPolicy(choice as SandboxLevel, this.options.cwd, this.options.config.sandbox?.writable)
+			: currentSandbox();
+		if (choice) setSandbox(policy);
+		const note = choice && this.agent.isRunning ? " (from the next command)" : "";
+		if (!policy) {
+			this.notice(style.gray(`Sandbox off${note}: commands can write anywhere and reach the internet.`));
+		} else {
+			const reach = policy.level === "on" ? "reach only localhost" : "reach the internet";
+			const others = policy.writableRoots.filter((root) => root !== policy.project).join(", ");
+			this.notice(
+				style.gray(`Sandbox ${policy.level}${note}: commands ${reach} and write only in ${policy.project}`) +
+					style.gray(`, and ${others}.`),
+			);
+		}
 		this.updateFooter();
 	}
 
@@ -1219,6 +1271,151 @@ class InteractiveApp {
 		};
 	}
 
+	// Tests
+
+	/**
+	 * `/test eval|workbench|all [quick] [resume]` benchmarks the loaded model with the suites in models.yml's
+	 * `tests.folder`, one after another; `/test stop` ends a run. The model stays loaded and the suites use its
+	 * server, so nothing reloads. Messages typed meanwhile wait until the run ends.
+	 */
+	private async testCommand(args: string): Promise<void> {
+		const arg = args.trim().toLowerCase();
+		if (arg === "stop") {
+			if (this.testRun) this.testRun.abort();
+			else this.notice(style.gray("No test is running."));
+			return;
+		}
+		const folder = this.options.config.tests?.folder;
+		if (!folder) {
+			this.notice(
+				style.yellow(
+					"No test suites are set up. Add this to models.yml:\n  tests:\n    folder: <folder holding Eval/ and Work_Bench/>",
+				),
+			);
+			return;
+		}
+		const parsed = parseTestArgs(arg);
+		if ("error" in parsed) {
+			this.notice(style.yellow(parsed.error));
+			return;
+		}
+		if (!this.requireIdle()) return;
+		if (!this.agent.model) {
+			this.notice(style.yellow("Pick the model to test with /model first."));
+			this.pickModel();
+			return;
+		}
+
+		const controller = new AbortController();
+		this.testRun = controller;
+		this.busy = true;
+		try {
+			// The suites use the server Arc runs, so start it now if no prompt has yet.
+			if (!(await this.ensureServer()) || controller.signal.aborted) {
+				if (!controller.signal.aborted) this.notice(style.red("The model did not load, so no test ran."));
+				return;
+			}
+			for (const [index, suite] of parsed.suites.entries()) {
+				// An hours-long suite leaves much of the server's memory in swap: the next suite starts on a fresh one.
+				// Only a server Arc started can be restarted; a discovered one belongs to someone else.
+				if (index > 0 && !controller.signal.aborted && this.options.manager.ownsServer) {
+					this.notice(style.gray("Restarting llama-server to release its memory before the next suite."));
+					await this.options.manager.stop();
+					if (!(await this.ensureServer()) || controller.signal.aborted) break;
+				}
+				const model = this.agent.model;
+				if (controller.signal.aborted || !model) break;
+				const run = suiteCommand(folder, suite, model, this.agent.mode, this.options.config.path, parsed.options);
+				if ("error" in run) this.notice(style.red(run.error));
+				else await this.runTestSuite(run, parsed.options.quick, controller.signal);
+			}
+		} finally {
+			this.testRun = undefined;
+			this.busy = false;
+			this.setStatus(undefined);
+			this.setAiStatus("idle");
+		}
+		if (this.pending.length > 0) {
+			const next = this.pending.join("\n\n");
+			this.pending = [];
+			void this.runPrompt(next);
+		}
+	}
+
+	/** Run one suite with its output in the transcript, then show and open its report. */
+	private async runTestSuite(run: SuiteCommand, quick: boolean, signal: AbortSignal): Promise<void> {
+		const label = this.agent.model ? modelLabel(this.agent.model) : "the model";
+		this.notice(style.bold(`${run.title}${quick ? " (quick)" : ""}: testing ${label} in ${this.agent.mode} mode`));
+		const started = Date.now();
+		let passed = 0;
+		let failed = 0;
+		let task = "";
+		const showStatus = () => {
+			const counts = passed + failed > 0 ? ` · ${passed} passed, ${failed} failed` : "";
+			this.setStatus(`Testing ${run.title}${task ? ` · ${task}` : ""}${counts}`, "esc to stop the test", started);
+		};
+		showStatus();
+		this.setAiStatus("working");
+		const result = await runSuite(
+			run,
+			(line) => {
+				const progress = progressIn(line);
+				if (progress && "pass" in progress) {
+					if (progress.pass) passed++;
+					else failed++;
+					showStatus();
+				} else if (progress) {
+					task = progress.task;
+					showStatus();
+				}
+				const text = line.trimEnd();
+				this.notice(
+					/^PASS /.test(text)
+						? style.green(text)
+						: /^(FAIL |error:)/.test(text)
+							? style.red(text)
+							: style.gray(text),
+				);
+			},
+			signal,
+			(partial) => {
+				const progress = progressIn(partial);
+				if (progress && "task" in progress && progress.task !== task) {
+					task = progress.task;
+					showStatus();
+				}
+			},
+		);
+		const took = formatDuration(Date.now() - started);
+		if (signal.aborted) {
+			this.notice(
+				style.yellow(
+					`${run.title} stopped after ${took}. ${
+						run.suite === "eval"
+							? "Run the same /test today to continue where it stopped."
+							: "/test workbench resume continues it."
+					}`,
+				),
+			);
+			return;
+		}
+		// Eval exits 2 when some cases failed: the run itself completed.
+		const completed = result.code === 0 || (run.suite === "eval" && result.code === 2);
+		this.notice(
+			completed
+				? style.green(`${run.title} finished in ${took}.`)
+				: style.red(`${run.title} ended with exit code ${result.code ?? "unknown"} after ${took}.`),
+		);
+		const report = result.reports.find((entry) => entry.thisRun);
+		if (report) {
+			this.notice(style.gray(`Report: ${report.path} (opening it)`));
+			openReport(report.path);
+		}
+		const dashboard = result.reports.find((entry) => !entry.thisRun);
+		if (dashboard) this.notice(style.gray(`All runs compared: ${dashboard.path}`));
+		notify(`${run.title} ${completed ? "finished" : "stopped"} for ${label}`, "Arc Test");
+	}
+
 	/** `/usage`: the tokens this session's replies used, and the critic's while supervising. */
 	private showUsage(): void {
 		const actor = tallyUsage(this.agent.messages);
@@ -1257,7 +1454,9 @@ class InteractiveApp {
 			style.yellow(
 				this.supervisorRun
 					? "The supervisor is running. /supervise stop or esc stops it."
-					: "Wait for the current request to finish, or press esc to abort it.",
+					: this.testRun
+						? "A test is running. /test stop or esc stops it."
+						: "Wait for the current request to finish, or press esc to abort it.",
 			),
 		);
 		return false;
@@ -1858,8 +2057,11 @@ class InteractiveApp {
 	}
 
 	/** Show a status above the editor, with elapsed seconds repainted once per second. */
-	/** @param hint what esc does now, shown after the elapsed time. */
-	private setStatus(label: string | undefined, hint = "esc to abort"): void {
+	/**
+	 * @param hint what esc does now, shown after the elapsed time.
+	 * @param started when the work began, to keep counting across label changes.
+	 */
+	private setStatus(label: string | undefined, hint = "esc to abort", started = Date.now()): void {
 		clearInterval(this.statusTimer);
 		this.statusTimer = undefined;
 		if (!label) {
@@ -1867,7 +2069,6 @@ class InteractiveApp {
 			this.tui.requestRender();
 			return;
 		}
-		const started = Date.now();
 		const paint = () => {
 			const elapsed = formatDuration(Math.floor((Date.now() - started) / 1000) * 1000);
 			const queued = this.pending.length + this.agent.queuedMessages.length;
@@ -1886,6 +2087,7 @@ class InteractiveApp {
 				mode: this.agent.mode,
 				interactionMode: this.agent.interactionMode,
 				web: this.agent.web,
+				sandbox: sandboxAvailable() ? (currentSandbox()?.level ?? "off") : undefined,
 				rag: this.agent.rag,
 				ponytail: this.agent.ponytail,
 				supervisor: this.supervisor?.state,
@@ -1923,10 +2125,10 @@ class InteractiveApp {
 }
 
 /** A macOS notification, for a person away from the terminal. Elsewhere, or if it fails, nothing happens. */
-function notify(text: string): void {
+function notify(text: string, title = "Arc Supervisor"): void {
 	if (process.platform !== "darwin") return;
 	const quoted = text.replace(/["\\]/g, "");
-	execFile("osascript", ["-e", `display notification "${quoted}" with title "Arc Supervisor"`], () => {});
+	execFile("osascript", ["-e", `display notification "${quoted}" with title "${title}"`], () => {});
 }
 
 /** A `discover` entry that has not been connected yet: it still names no GGUF. */

@@ -26,6 +26,7 @@ import {
 	SessionFile,
 } from "./session.ts";
 import { createToolsForModel, killRunningCommands } from "./tools/index.ts";
+import { sandboxAvailable, sandboxPolicy, setSandbox } from "./tools/sandbox.ts";
 import { runInteractive } from "./tui/app.ts";
 import { formatDuration } from "./tui/components.ts";
 
@@ -265,6 +266,9 @@ async function main(argv: string[]): Promise<number> {
 	}
 
 	const cwd = process.cwd();
+	// On unless models.yml says otherwise: a model left alone overnight should not reach the internet or write
+	// outside the project by default.
+	if (sandboxAvailable()) setSandbox(sandboxPolicy(config.sandbox?.level ?? "off", cwd, config.sandbox?.writable));
 	let session: LoadedSession | undefined;
 	if (values.session !== undefined) {
 		const path = resolveSessionPath(appDir, cwd, values.session);
