@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { basename } from "node:path";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 
 /** Git's empty tree: the phase-start ref of a repository with no commits yet. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -37,12 +39,22 @@ export interface GitResult {
 }
 
 /** Run git in `cwd`. Resolves with the exit code rather than rejecting, since `git diff --no-index` exits 1 on a difference. */
-export function git(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<GitResult> {
+export function git(
+	cwd: string,
+	args: readonly string[],
+	signal?: AbortSignal,
+	env: Record<string, string> = {},
+): Promise<GitResult> {
 	return new Promise((resolve, reject) => {
 		execFile(
 			"git",
 			args,
-			{ cwd, signal, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" } },
+			{
+				cwd,
+				signal,
+				maxBuffer: 256 * 1024 * 1024,
+				env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C", ...env },
+			},
 			(error, stdout, stderr) => {
 				const code = error ? (error as { code?: unknown }).code : 0;
 				if (typeof code !== "number") {
@@ -55,8 +67,13 @@ export function git(cwd: string, args: readonly string[], signal?: AbortSignal):
 	});
 }
 
-async function gitOk(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
-	const result = await git(cwd, args, signal);
+async function gitOk(
+	cwd: string,
+	args: readonly string[],
+	signal?: AbortSignal,
+	env?: Record<string, string>,
+): Promise<string> {
+	const result = await git(cwd, args, signal, env);
 	if (result.code !== 0) throw new Error(`git ${args[0]} failed: ${(result.stderr || result.stdout).trim()}`);
 	return result.stdout;
 }
@@ -127,16 +144,61 @@ export async function diffSince(cwd: string, ref: string, maxChars: number, sign
 	const files = await changedFiles(cwd, ref, signal);
 	const diffs: string[] = [];
 	for (const file of files) {
-		if (isLockFile(file.path)) {
-			diffs.push(`${file.path}: dependency lock file changed; contents left out.`);
-			continue;
-		}
 		const args = file.untracked
 			? ["diff", "--no-color", "--no-index", "--", "/dev/null", file.path]
 			: ["diff", "--no-color", "--no-renames", ref, "--", file.path];
-		diffs.push((await git(cwd, args, signal)).stdout.trimEnd());
+		diffs.push(isLockFile(file.path) ? lockNote(file.path) : (await git(cwd, args, signal)).stdout.trimEnd());
 	}
+	return fitDiffs(files, diffs, maxChars);
+}
 
+/**
+ * The working tree as a tree object, untracked files included and ignored ones not, written through a copy of the
+ * index so the real one is untouched. Diffing two snapshots shows what changed between two moments of one phase.
+ */
+export async function snapshotTree(cwd: string, signal?: AbortSignal): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), "arc-snapshot-"));
+	const env = { GIT_INDEX_FILE: join(dir, "index") };
+	try {
+		// Starting from the real index keeps its file stats, so unchanged files are not hashed again.
+		const index = resolve(cwd, (await gitOk(cwd, ["rev-parse", "--git-path", "index"], signal)).trim());
+		await copyFile(index, env.GIT_INDEX_FILE).catch(() => undefined);
+		await gitOk(cwd, ["add", "-A", "--", "."], signal, env);
+		return (await gitOk(cwd, ["write-tree"], signal, env)).trim();
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+/** What changed from snapshot `from` to snapshot `to`, laid out as `diffSince` does. */
+export async function diffTrees(
+	cwd: string,
+	from: string,
+	to: string,
+	maxChars: number,
+	signal?: AbortSignal,
+): Promise<PhaseDiff> {
+	const listed = await gitOk(cwd, ["diff", "--name-status", "--no-renames", "-z", from, to], signal);
+	const fields = listed.split("\0").filter(Boolean);
+	const files: ChangedFile[] = [];
+	for (let i = 0; i + 1 < fields.length; i += 2) {
+		const status = fields[i][0];
+		files.push({ path: fields[i + 1], status: status === "A" || status === "D" || status === "T" ? status : "M" });
+	}
+	files.sort((a, b) => a.path.localeCompare(b.path));
+	const diffs: string[] = [];
+	for (const file of files) {
+		const args = ["diff", "--no-color", "--no-renames", from, to, "--", file.path];
+		diffs.push(isLockFile(file.path) ? lockNote(file.path) : (await git(cwd, args, signal)).stdout.trimEnd());
+	}
+	return fitDiffs(files, diffs, maxChars);
+}
+
+function lockNote(path: string): string {
+	return `${path}: dependency lock file changed; contents left out.`;
+}
+
+function fitDiffs(files: ChangedFile[], diffs: string[], maxChars: number): PhaseDiff {
 	const header = `Changed files (${files.length}):\n${files.map((file) => `${file.status} ${file.path}`).join("\n")}`;
 	let room = Math.max(0, maxChars - header.length - 2 * files.length);
 	const limits = new Map<number, number>();

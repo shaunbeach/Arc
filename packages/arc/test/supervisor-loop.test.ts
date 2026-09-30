@@ -236,6 +236,27 @@ describe("Supervisor", () => {
 		}
 	});
 
+	it("re-reviews a failed phase against the critic's reasons and the changes since, then clears them on a pass", async () => {
+		const h = harness("## Phase 1: A\nDo it.", (_text, turn, dir) => {
+			writeFileSync(join(dir, turn === 1 ? "a.ts" : "b.ts"), "x");
+			return undefined;
+		});
+		try {
+			const { prompts } = stubCritic('{"verdict":"fail","reasons":["b.ts: missing"]}', PASS);
+			const state = await startState(h.plan, h.dir);
+			if (!state) throw new Error("no phase");
+			const final = await new Supervisor(h.host, state).run(new AbortController().signal);
+			expect(final.status).toBe("done");
+			expect(prompts[0]).not.toContain("re-review");
+			expect(prompts[1]).toContain("Changes since the earlier review:\n\nChanged files (1):\nA b.ts");
+			expect(prompts[1]).toContain("An earlier review failed this phase for these reasons:\n- b.ts: missing");
+			expect(h.saved.some((saved) => saved.review?.reasons[0] === "b.ts: missing")).toBe(true);
+			expect(final.review).toBeUndefined();
+		} finally {
+			h.cleanup();
+		}
+	});
+
 	it("stops when the actor's turn is aborted, and resumes by asking it to continue", async () => {
 		const h = harness("## Phase 1: A\nDo it.", (_text, turn) => (turn === 1 ? "aborted" : undefined));
 		try {

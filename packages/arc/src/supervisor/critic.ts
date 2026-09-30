@@ -31,6 +31,8 @@ export interface CriticRequest {
 	checks: readonly CheckResult[];
 	/** Image files the checks wrote. */
 	screenshots: readonly string[];
+	/** Set for a re-review: what the critic's last failing review said, and the diff since it, already cut. */
+	earlier?: { reasons: readonly string[]; diff: string };
 }
 
 /** `model` as the supervisor launches its critic: `--ctx-size` replaced by at most `CRITIC_CONTEXT`. */
@@ -96,11 +98,14 @@ Reply with JSON only: {"verdict":"pass","reasons":[]} or {"verdict":"fail","reas
 
 /**
  * The critic's request, requirements last so they are freshest when it answers. With `images`, the screenshots are
- * attached between the check output and the requirements; without, their paths are listed.
+ * attached between the check output and the requirements; without, their paths are listed. A re-review adds the diff
+ * since the earlier review after the phase's diff, and the earlier reasons after the requirements: judging each one
+ * keeps the critic from failing a fixed phase on a fresh nitpick every round.
  */
 export function formatCriticPrompt(request: CriticRequest, images: boolean): { system: string; parts: string[] } {
-	const { phase, phaseCount, diff, checks, screenshots } = request;
-	const before = `Changes made during this phase:\n\n${diff || "(no changes)"}\n\nChecks run after the phase:\n\n${formatChecks(checks)}`;
+	const { phase, phaseCount, diff, checks, screenshots, earlier } = request;
+	const since = earlier ? `\n\nChanges since the earlier review:\n\n${earlier.diff || "(no changes)"}` : "";
+	const before = `Changes made during this phase:\n\n${diff || "(no changes)"}${since}\n\nChecks run after the phase:\n\n${formatChecks(checks)}`;
 	const listed = screenshots.map((path) => `- ${path}`).join("\n");
 	const shots =
 		screenshots.length === 0
@@ -108,7 +113,10 @@ export function formatCriticPrompt(request: CriticRequest, images: boolean): { s
 			: images
 				? `\n\nScreenshots the checks saved, in this order:\n${listed}`
 				: `\n\nThe checks saved these screenshots, which you cannot see:\n${listed}`;
-	const after = `Phase ${phase.number} of ${phaseCount}: ${phase.title}\n\nRequirements:\n${phase.body || "(none written)"}\n\nIs phase ${phase.number} complete and correct? Reply with the JSON verdict.`;
+	const rereview = earlier
+		? `\n\nThis is a re-review. An earlier review failed this phase for these reasons:\n${earlier.reasons.map((reason) => `- ${reason}`).join("\n")}\n\nPass if each reason is fixed, or the code shows it was mistaken, and the changes since that review broke nothing. Do not fail the phase for new issues in code the earlier review already saw, unless a "Done when" criterion is still unmet. On a fail, list the reasons that still hold and what the changes broke.`
+		: "";
+	const after = `Phase ${phase.number} of ${phaseCount}: ${phase.title}\n\nRequirements:\n${phase.body || "(none written)"}${rereview}\n\nIs phase ${phase.number} complete and correct? Reply with the JSON verdict.`;
 	return { system: SYSTEM, parts: [before + shots, after] };
 }
 

@@ -4,7 +4,16 @@ import type { LiteModel } from "../config/models.ts";
 import { addUsage, NO_USAGE, type TokenUsage } from "../usage.ts";
 import { askCritic, type Verdict } from "./critic.ts";
 import { checkPassed, formatChecks, type GateResult, runChecks } from "./gate.ts";
-import { commitPhase, diffBudgetChars, diffSince, filesFromPassedPhases, passedPhases, phaseStartRef } from "./git.ts";
+import {
+	commitPhase,
+	diffBudgetChars,
+	diffSince,
+	diffTrees,
+	filesFromPassedPhases,
+	passedPhases,
+	phaseStartRef,
+	snapshotTree,
+} from "./git.ts";
 import {
 	type FrozenPlan,
 	findTampering,
@@ -22,6 +31,8 @@ import { nextPhase, type Phase, parsePlan } from "./plan.ts";
 const EARLIER_FILES_SHOWN = 30;
 /** Most of a project's AGENTS.md each phase brief carries: it is sent again with every phase. */
 const CONVENTIONS_CHARS = 3000;
+/** Share of the critic's diff budget a re-review gives the changes since the earlier review. */
+const FIX_DIFF_SHARE = 1 / 3;
 
 /**
  * `running`: the loop is working. `stopped`: esc or an abort ended it. `halted`: a phase failed `maxRetries` times, or
@@ -48,6 +59,11 @@ export interface SupervisorState {
 	/** The commit the phase's diff is taken against. */
 	startRef?: string;
 	lastVerdict?: Verdict;
+	/**
+	 * The critic's last failing review of this phase: its reasons and a snapshot of the tree it saw. The next review
+	 * judges those reasons against the changes since, rather than reviewing the whole phase afresh.
+	 */
+	review?: { reasons: string[]; tree: string };
 	/** Why the loop halted, when it did. */
 	haltReason?: string;
 	/** Why the loop guard ended the actor's last turn, until the actor has been told. */
@@ -204,6 +220,7 @@ function describeCheck(check: GateResult["checks"][number]): string {
  * the critic judges the diff. A pass commits the phase and starts the next one in a fresh context. A fail sends the
  * reasons back to the actor, which keeps the phase's history. After `maxRetries` fails the phase starts once more in a
  * fresh context, with its work on disk and the last reasons; after `maxRetries` more the loop halts and notifies.
+ * After the critic fails a phase, its next review judges those reasons against the changes since, not the whole phase.
  * Every step is saved first, so a resume picks up where the loop stopped.
  */
 export class Supervisor {
@@ -361,14 +378,24 @@ export class Supervisor {
 					host.status(`${label}: loading the critic`);
 					const critic = await host.loadCritic(signal);
 					host.status(`${label}: the critic is reviewing`);
+					const budget = diffBudgetChars(critic.contextWindow);
+					const tree = await snapshotTree(host.cwd, signal);
+					const { review } = this.state;
+					// A snapshot git has since pruned falls back to a full review.
+					const fix = review
+						? await diffTrees(host.cwd, review.tree, tree, Math.floor(budget * FIX_DIFF_SHARE), signal).catch(
+								() => undefined,
+							)
+						: undefined;
 					const diff = await diffSince(
 						host.cwd,
 						this.state.startRef ?? (await phaseStartRef(host.cwd, signal)),
-						diffBudgetChars(critic.contextWindow),
+						budget - (fix?.text.length ?? 0),
 						signal,
 					);
-					if (diff.truncated.length > 0) {
-						host.notice(`${label}: diffs cut to fit the critic: ${diff.truncated.join(", ")}.`, "info");
+					const truncated = [...new Set([...diff.truncated, ...(fix?.truncated ?? [])])];
+					if (truncated.length > 0) {
+						host.notice(`${label}: diffs cut to fit the critic: ${truncated.join(", ")}.`, "info");
 					}
 					const answer = await askCritic(
 						critic,
@@ -378,11 +405,15 @@ export class Supervisor {
 							diff: diff.text,
 							checks: gate.checks,
 							screenshots: gate.screenshots,
+							...(review && fix ? { earlier: { reasons: review.reasons, diff: fix.text } } : {}),
 						},
 						{ signal },
 					);
 					verdict = { pass: answer.pass, reasons: answer.reasons };
-					this.update({ criticUsage: addUsage(this.state.criticUsage ?? NO_USAGE, answer.usage) });
+					this.update({
+						criticUsage: addUsage(this.state.criticUsage ?? NO_USAGE, answer.usage),
+						...(answer.pass ? {} : { review: { reasons: answer.reasons, tree } }),
+					});
 				}
 				host.status(undefined);
 
@@ -396,7 +427,7 @@ export class Supervisor {
 						: await passedPhases(host.cwd, signal);
 					const next = nextPhase(phases, done);
 					if (!next) {
-						this.update({ status: "done", lastVerdict: verdict, passed });
+						this.update({ status: "done", lastVerdict: verdict, passed, review: undefined });
 						host.notice("Supervisor: every phase passed.", "good");
 						return this.state;
 					}
@@ -406,6 +437,7 @@ export class Supervisor {
 						message: undefined,
 						failures: 0,
 						restarted: undefined,
+						review: undefined,
 						stuck: undefined,
 						lastVerdict: verdict,
 						passed,
