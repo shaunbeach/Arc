@@ -39,8 +39,10 @@ export interface SupervisorState {
 	/** `actor`: the actor gets `message` next (its kickoff when there is none). `audit`: the checks and critic are next. */
 	stage: "actor" | "audit";
 	message?: string;
-	/** Failed audits of this phase since it started or was resumed. */
+	/** Failed audits of this phase since it started, restarted, or was resumed. */
 	failures: number;
+	/** The phase failed `maxRetries` times and was started again in a fresh context; the next time it halts. */
+	restarted?: boolean;
 	/** Transcript index of the phase's kickoff: requests leave out everything before it. */
 	phaseStart?: number;
 	/** The commit the phase's diff is taken against. */
@@ -125,6 +127,7 @@ export function kickoffMessage(
 	plan: string,
 	earlierFiles: readonly string[],
 	conventions?: string,
+	restart?: string,
 ): string {
 	const lines = [`[Supervisor] Phase ${phase.number} of ${phases.length}: ${phase.title}`, "", phase.body];
 	if (conventions?.trim()) {
@@ -151,7 +154,17 @@ export function kickoffMessage(
 		"",
 		`The whole plan is in ${plan}. Work on this phase only, and end your turn when it is complete: a reviewer then checks it.`,
 	);
+	if (restart) lines.push("", restart);
 	return lines.join("\n");
+}
+
+/** What the last review found: the reasons, the check output when a check failed, and why the guard stopped a turn. */
+function reviewLines(verdict: Verdict, gate: GateResult, stuck?: string): string[] {
+	const lines: string[] = [];
+	if (stuck) lines.push("", `Your last turn was stopped because ${stuck}. Try a different approach.`);
+	lines.push("", "Reasons:", ...verdict.reasons.map((reason) => `- ${reason}`));
+	if (!gate.passed) lines.push("", "Check output:", "", formatChecks(gate.checks));
+	return lines;
 }
 
 /** What the actor reads after a failed audit. */
@@ -164,10 +177,19 @@ export function failureMessage(
 	stuck?: string,
 ): string {
 	const lines = [`[Supervisor] Phase ${phase.number} failed review (attempt ${failures} of ${maxRetries}).`];
-	if (stuck) lines.push("", `Your last turn was stopped because ${stuck}. Try a different approach.`);
-	lines.push("", "Reasons:", ...verdict.reasons.map((reason) => `- ${reason}`));
-	if (!gate.passed) lines.push("", "Check output:", "", formatChecks(gate.checks));
-	lines.push("", "Fix these, then end your turn.");
+	lines.push(...reviewLines(verdict, gate, stuck), "", "Fix these, then end your turn.");
+	return lines.join("\n");
+}
+
+/**
+ * Appended to the kickoff of a restarted phase. A small model that failed a phase several times has filled its window
+ * with the attempts; a fresh start keeps the work on disk and carries over only what the last review found.
+ */
+export function restartNote(failures: number, verdict: Verdict, gate: GateResult, stuck?: string): string {
+	const lines = [
+		`An earlier attempt at this phase failed review ${failures} times and was stopped, so you start with a fresh context. Its changes are still in place (git status and git diff list them): keep what is right and fix what the last review found.`,
+		...reviewLines(verdict, gate, stuck).map((line) => (line === "Reasons:" ? "Last review:" : line)),
+	];
 	return lines.join("\n");
 }
 
@@ -180,7 +202,8 @@ function describeCheck(check: GateResult["checks"][number]): string {
 /**
  * The actor-critic loop. Each phase: the actor works until it ends its turn; the phase's checks run; if they pass,
  * the critic judges the diff. A pass commits the phase and starts the next one in a fresh context. A fail sends the
- * reasons back to the actor, which keeps the phase's history; after `maxRetries` fails the loop halts and notifies.
+ * reasons back to the actor, which keeps the phase's history. After `maxRetries` fails the phase starts once more in a
+ * fresh context, with its work on disk and the last reasons; after `maxRetries` more the loop halts and notifies.
  * Every step is saved first, so a resume picks up where the loop stopped.
  */
 export class Supervisor {
@@ -201,6 +224,24 @@ export class Supervisor {
 	private async readPhases(signal?: AbortSignal): Promise<Phase[]> {
 		const frozen = this.state.frozenPlan;
 		return frozen ? parsePlan(await readFrozenPlan(this.host.cwd, frozen, signal)) : readPlan(this.state.plan);
+	}
+
+	/** The message that opens `phase` in a fresh context, with `restart` appended when the phase is starting over. */
+	private async kickoff(
+		phase: Phase,
+		phases: readonly Phase[],
+		signal: AbortSignal,
+		restart?: string,
+	): Promise<string> {
+		const { cwd } = this.host;
+		return kickoffMessage(
+			phase,
+			phases,
+			relative(cwd, this.state.plan) || this.state.plan,
+			await filesFromPassedPhases(cwd, signal),
+			await readFile(join(cwd, "AGENTS.md"), "utf8").catch(() => undefined),
+			restart,
+		);
 	}
 
 	/** `/supervise reload`: adopt the plan as committed now, after a person changed it on purpose. */
@@ -240,9 +281,17 @@ export class Supervisor {
 		} catch (error) {
 			return this.halt(error instanceof Error ? error.message : String(error));
 		}
-		// A person looked at a halted phase before resuming it, so it gets its retries back.
-		const failures = this.state.status === "halted" ? 0 : this.state.failures;
-		this.update({ status: "running", failures, haltReason: undefined, ...(begin ? { stage: begin } : {}) });
+		// A person looked at a halted phase before resuming it, so it gets its retries and its restart back.
+		const halted = this.state.status === "halted";
+		const failures = halted ? 0 : this.state.failures;
+		const restarted = halted ? undefined : this.state.restarted;
+		this.update({
+			status: "running",
+			failures,
+			restarted,
+			haltReason: undefined,
+			...(begin ? { stage: begin } : {}),
+		});
 		try {
 			while (true) {
 				const problem = await historyProblem(host.cwd, this.state.passed ?? [], this.state.startRef, signal);
@@ -254,18 +303,10 @@ export class Supervisor {
 
 				if (this.state.stage === "actor") {
 					if (this.state.message === undefined) {
-						const earlier = await filesFromPassedPhases(host.cwd, signal);
-						const plan = relative(host.cwd, this.state.plan) || this.state.plan;
 						this.update({
 							startRef: await phaseStartRef(host.cwd, signal),
 							phaseStart: host.transcriptLength(),
-							message: kickoffMessage(
-								phase,
-								phases,
-								plan,
-								earlier,
-								await readFile(join(host.cwd, "AGENTS.md"), "utf8").catch(() => undefined),
-							),
+							message: await this.kickoff(phase, phases, signal),
 						});
 						host.notice(`Supervisor: ${label}, ${phase.title}.`, "info");
 					}
@@ -364,6 +405,7 @@ export class Supervisor {
 						stage: "actor",
 						message: undefined,
 						failures: 0,
+						restarted: undefined,
 						stuck: undefined,
 						lastVerdict: verdict,
 						passed,
@@ -374,13 +416,24 @@ export class Supervisor {
 				}
 
 				const failures = this.state.failures + 1;
-				const message = failureMessage(phase, failures, host.maxRetries, verdict, gate, this.state.stuck);
+				const { stuck } = this.state;
+				const message = failureMessage(phase, failures, host.maxRetries, verdict, gate, stuck);
 				this.update({ stage: "actor", message, failures, lastVerdict: verdict, stuck: undefined });
 				host.notice(
 					`${label} failed (${failures} of ${host.maxRetries}):\n${verdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
 					"bad",
 				);
-				if (failures >= host.maxRetries) return this.halt(`${label} failed ${failures} times.`);
+				if (failures < host.maxRetries) continue;
+				if (this.state.restarted) return this.halt(`${label} failed ${failures} times after a fresh start.`);
+				// The diff stays against the phase's start, so the critic still sees the first context's work.
+				const restart = restartNote(failures, verdict, gate, stuck);
+				this.update({
+					message: await this.kickoff(phase, phases, signal, restart),
+					phaseStart: host.transcriptLength(),
+					failures: 0,
+					restarted: true,
+				});
+				host.notice(`${label}: starting the phase again in a fresh context, with its work kept.`, "info");
 			}
 		} catch (error) {
 			host.status(undefined);

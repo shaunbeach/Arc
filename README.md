@@ -291,7 +291,7 @@ It costs about 200 tokens per request while it is on, nothing while it is off. T
 ```yaml
 supervisor:
   critic: Ornith-1.5-9B-65k-Vision   # any local model entry
-  maxRetries: 3                      # failed attempts at one phase before halting
+  maxRetries: 3                      # failed attempts at one phase before a fresh start, and again before halting
   attemptMinutes: 90                 # longest one actor turn may run
 ```
 
@@ -314,7 +314,7 @@ For each phase:
 3. Otherwise Arc stops the actor's llama-server and starts the critic's with a 64k window, which fits a 16 GB Mac. The critic reads the phase, the `git diff` since the phase began (cut to 60% of its window), the check output, and any images the checks saved: as images when the critic has a vision projector (`mmproj:` in `models.yml`, or `--mmproj` in `launchArgs`), otherwise as paths. A grammar forces its answer to pass, or fail with up to five reasons.
 4. A pass is committed as `arc: phase N passed: title`, and the next phase starts in a fresh context: the actor gets the whole window, plus a list of the files earlier phases built. A fail goes back to the actor with the reasons, and the actor keeps its history of the phase.
 5. A loop guard watches the actor. If it makes the same tool call 3 times among its last 5, or one turn runs past `attemptMinutes`, Arc ends the turn and checks the phase right away. On a fail, the actor is told why it was stopped.
-6. After `maxRetries` fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries back.
+6. After `maxRetries` fails, the phase starts once more in a fresh context: its work stays on disk, and the actor gets the phase brief plus the last review's reasons, without the window full of earlier attempts. After `maxRetries` more fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries and its fresh start back.
 
 The project must be a git repository with no uncommitted changes, since each passed phase becomes a commit. The checks run in the [sandbox](#sandbox), at the level in effect when they run.
 

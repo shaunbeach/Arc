@@ -194,24 +194,42 @@ describe("Supervisor", () => {
 		}
 	});
 
-	it("sends the critic's reasons back, halts after maxRetries with a notification, and resumes with fresh retries", async () => {
-		const h = harness("## Phase 1: A\nDo it.", () => undefined);
+	it("sends the critic's reasons back, restarts fresh after maxRetries, halts after maxRetries more, and resumes with fresh retries", async () => {
+		const h = harness("## Phase 1: A\nDo it.", (_text, turn, dir) => {
+			if (turn === 1) writeFileSync(join(dir, "a.ts"), "x");
+			return undefined;
+		});
 		try {
 			const fail = '{"verdict":"fail","reasons":["a.ts: missing export"]}';
-			stubCritic(fail, fail, fail, fail);
+			const { prompts } = stubCritic(...Array(8).fill(fail));
 			const state = await startState(h.plan, h.dir);
 			if (!state) throw new Error("no phase");
 			const supervisor = new Supervisor(h.host, state);
 			const halted = await supervisor.run(new AbortController().signal);
-			expect(halted).toMatchObject({ status: "halted", failures: 2, haltReason: "Phase 1/1 failed 2 times." });
+			expect(halted).toMatchObject({
+				status: "halted",
+				failures: 2,
+				restarted: true,
+				haltReason: "Phase 1/1 failed 2 times after a fresh start.",
+			});
 			expect(h.notified).toEqual(["Arc Supervisor halted. Intervention required."]);
 			expect(h.sent[1].text).toContain("- a.ts: missing export");
+			expect(h.sent.map((turn) => turn.contextStart)).toEqual([0, 0, 8, 8]);
+			expect(h.sent[2].text).toMatch(/^\[Supervisor\] Phase 1 of 1: A\n/);
+			expect(h.sent[2].text).toContain(
+				"An earlier attempt at this phase failed review 2 times and was stopped, so you start with a fresh context.",
+			);
+			expect(h.sent[2].text).toContain("Last review:\n- a.ts: missing export");
+			// The critic still sees the first context's work after the restart.
+			expect(prompts[3]).toContain("a.ts");
+			expect(h.notices).toContain("Phase 1/1: starting the phase again in a fresh context, with its work kept.");
 			expect(halted.message).toContain("attempt 2 of 2");
 
 			const again = await supervisor.run(new AbortController().signal);
-			expect(again.status).toBe("halted");
-			expect(h.sent[2].text).toContain("attempt 2 of 2");
-			expect(h.sent[3].text).toContain("attempt 1 of 2");
+			expect(again).toMatchObject({ status: "halted", restarted: true });
+			expect(h.sent[4].text).toContain("attempt 2 of 2");
+			expect(h.sent[5].text).toContain("attempt 1 of 2");
+			expect(h.sent[6].text).toContain("An earlier attempt at this phase failed review 2 times");
 			expect(h.saved.at(-1)).toEqual(again);
 		} finally {
 			h.cleanup();
