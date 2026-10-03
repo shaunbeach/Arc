@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { totalmem } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -23,7 +24,7 @@ import { findModel, type LiteModel, type ModelsConfig, modelLabel } from "../con
 import { getAppDir } from "../config/paths.ts";
 import { defaultSamplingMode, type SamplingMode } from "../config/sampling.ts";
 import { describeTrim } from "../context.ts";
-import { fetchServerProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
+import { fetchServerProps, listedProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
 import { getLocalIpAddress, type LlamaServerManager, serverOrigin, serverPort } from "../llm/server.ts";
 import {
 	DEFAULT_SWAP_THRESHOLD_BYTES,
@@ -38,7 +39,15 @@ import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
 import { isPonytailLevel, PONYTAIL_LEVEL_RULES, PONYTAIL_LEVELS } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
-import { KiwixKnowledgeBase } from "../rag/kiwix.ts";
+import { KiwixKnowledgeBase, SHELVES_FILE } from "../rag/kiwix.ts";
+import {
+	defaultWing,
+	palaceExists,
+	readMemoryWing,
+	runMempalace,
+	saveToPalace,
+	writeMemoryWing,
+} from "../rag/mempalace.ts";
 import {
 	type LoadedSession,
 	listSessions,
@@ -67,8 +76,17 @@ import {
 	type SupervisorState,
 	startState,
 } from "../supervisor/supervisor.ts";
-import { killLeftoverProcesses, setLeftoverLimit } from "../tools/child-process.ts";
+import { openReport, parseTestArgs, progressIn, runSuite, type SuiteCommand, suiteCommand } from "../test-suite.ts";
+import { killLeftoverProcesses, runShellCommand, setLeftoverLimit } from "../tools/child-process.ts";
 import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
+import {
+	currentSandbox,
+	isSandboxLevel,
+	type SandboxLevel,
+	sandboxAvailable,
+	sandboxPolicy,
+	setSandbox,
+} from "../tools/sandbox.ts";
 import { formatUsage, tallyUsage } from "../usage.ts";
 import { type CommandName, parseCommand, resolveMode, slashCommands } from "./commands.ts";
 import {
@@ -153,6 +171,8 @@ class InteractiveApp {
 	private readonly appDir = getAppDir();
 	/** The archives `/rag` searches, when models.yml has a `rag:` section. kiwix-serve starts on first use. */
 	private readonly knowledgeBase: KiwixKnowledgeBase | undefined;
+	/** This project's MemPalace wing, from `.arc/mempalace.json`. Sessions are saved there and the memory tool searches it. */
+	private memoryWing: string | undefined;
 	private readonly tui = new TuiMainScreen(new ProcessTerminal());
 	private readonly chat = new Container();
 	/**
@@ -201,6 +221,8 @@ class InteractiveApp {
 	private supervisor: Supervisor | undefined;
 	/** The running `/supervise` loop; esc stops it. */
 	private supervisorRun: AbortController | undefined;
+	/** A running `/test`; esc or `/test stop` ends it. */
+	private testRun: AbortController | undefined;
 	/** A critic named with `/audit <model>`, used instead of models.yml's until the loop stops. */
 	private criticOverride: string | undefined;
 	/** Serializes llama-server startups, so a model switch and a prompt never start two servers. */
@@ -223,6 +245,7 @@ class InteractiveApp {
 			this.knowledgeBase = knowledgeBase;
 			process.once("exit", () => knowledgeBase.stop());
 		}
+		this.memoryWing = readMemoryWing(cwd);
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
 		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
@@ -306,7 +329,8 @@ class InteractiveApp {
 			this.serverStart !== undefined ||
 			this.swapCooldown !== undefined ||
 			this.compactRun !== undefined ||
-			this.supervisorRun !== undefined;
+			this.supervisorRun !== undefined ||
+			this.testRun !== undefined;
 		if (matchesAction(data, "abort") && working) {
 			this.abort();
 			return { consume: true };
@@ -338,6 +362,10 @@ class InteractiveApp {
 		const command = parseCommand(input);
 		if (command) {
 			this.runCommand(command.name, command.args);
+		} else if (input.startsWith("!!")) {
+			this.runInteractiveCommand(input.slice(2).trim());
+		} else if (input.startsWith("!")) {
+			void this.runCapturedCommand(input.slice(1).trim());
 		} else if (this.isServing) {
 			this.notice(style.yellow("Currently serving a model. Press esc to stop serving before sending prompts."));
 		} else if (!this.agent.model) {
@@ -356,12 +384,61 @@ class InteractiveApp {
 		}
 	}
 
+	private runInteractiveCommand(cmd: string): void {
+		if (!cmd) return;
+		this.tui.stop();
+		console.clear();
+		try {
+			spawnSync(cmd, { shell: true, stdio: "inherit", cwd: this.options.cwd });
+		} catch (error) {
+			console.error(error);
+		}
+		// Pause briefly to let the user see the output if it exited immediately
+		console.log("\nPress Enter to return to Arc...");
+		try {
+			const buffer = Buffer.alloc(1);
+			import("node:fs").then(({ readSync }) => readSync(0, buffer, 0, 1, null)).catch(() => {});
+		} catch {}
+
+		this.tui.start();
+		this.tui.requestRender(true);
+		this.notice(style.gray(`Ran interactive command: ${cmd}`));
+	}
+
+	private async runCapturedCommand(cmd: string): Promise<void> {
+		if (!cmd) return;
+		if (!this.requireIdle()) return;
+
+		this.setAiStatus("working");
+		this.notice(style.gray(`Running: ${cmd}`));
+		this.tui.requestRender();
+
+		try {
+			const chunks: Buffer[] = [];
+			const _result = await runShellCommand(cmd, this.options.cwd, {
+				onData: (data) => chunks.push(data),
+			});
+
+			let output = Buffer.concat(chunks).toString("utf8");
+			if (!output.trim()) output = "(No output)";
+
+			// Inject into the LLM context by executing a prompt with the output
+			const prompt = `I ran \`${cmd}\` and got this output:\n\`\`\`\n${output}\n\`\`\``;
+			void this.runPrompt(prompt, false);
+		} catch (error) {
+			this.notice(style.red(`Failed to run ${cmd}: ${error}`));
+			this.setAiStatus("idle");
+			this.tui.requestRender();
+		}
+	}
+
 	private abort(): void {
 		this.agent.abort();
 		this.serverStart?.abort();
 		this.swapCooldown?.abort();
 		this.compactRun?.abort();
 		this.supervisorRun?.abort();
+		this.testRun?.abort();
 		this.serveAbortController?.abort();
 		this.swapMonitor?.stop();
 		this.swapMonitor = undefined;
@@ -594,6 +671,9 @@ class InteractiveApp {
 
 	private runCommand(name: CommandName, args: string): void {
 		switch (name) {
+			case "cd":
+				this.changeDirectory(args);
+				return;
 			case "agent":
 			case "plan":
 			case "chat":
@@ -602,8 +682,14 @@ class InteractiveApp {
 			case "web":
 				this.switchWeb(args);
 				return;
+			case "sandbox":
+				this.switchSandbox(args);
+				return;
 			case "rag":
 				this.switchRag(args);
+				return;
+			case "mempalace":
+				void this.linkMempalace(args);
 				return;
 			case "ponytail":
 				if (args) this.setPonytail(args);
@@ -644,6 +730,9 @@ class InteractiveApp {
 			case "usage":
 				this.showUsage();
 				return;
+			case "test":
+				void this.testCommand(args);
+				return;
 			case "quit":
 				this.stop();
 				return;
@@ -654,8 +743,46 @@ class InteractiveApp {
 	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
 	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
 	 */
-	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase"> {
-		return { allowLocalNetwork: () => this.agent.interactionMode === "agent", knowledgeBase: this.knowledgeBase };
+	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory"> {
+		return {
+			allowLocalNetwork: () => this.agent.interactionMode === "agent",
+			knowledgeBase: this.knowledgeBase,
+			memory: this.memoryWing || palaceExists() ? { wing: this.memoryWing } : undefined,
+		};
+	}
+
+	/**
+	 * `/mempalace [wing]`: link this project to a MemPalace wing (default: the folder name). From then on each session
+	 * is saved to the wing when it ends, and the model gets the memory tool to search it. Run again to show the link.
+	 */
+	private async linkMempalace(arg: string): Promise<void> {
+		const wing = arg.trim();
+		if (!wing && this.memoryWing) {
+			this.notice(style.gray(`This project saves sessions to MemPalace wing "${this.memoryWing}".`));
+			return;
+		}
+		try {
+			await runMempalace(["--help"]);
+		} catch (error) {
+			this.notice(style.red(errorText(error)));
+			return;
+		}
+		this.memoryWing = wing || defaultWing(this.options.cwd);
+		writeMemoryWing(this.options.cwd, this.memoryWing);
+		const model = this.agent.model;
+		if (model) this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
+		this.notice(
+			style.gray(
+				`Linked to MemPalace wing "${this.memoryWing}" (.arc/mempalace.json). Sessions are saved there when they end; the model searches them with memory.`,
+			),
+		);
+		this.updateFooter();
+	}
+
+	/** Save the current conversation to this project's wing, if it has one. */
+	private saveMemory(): void {
+		if (!this.memoryWing) return;
+		saveToPalace(this.appDir, this.memoryWing, this.session?.id ?? randomUUID(), this.agent.messages);
 	}
 
 	/** What the session file records: the model, its sampling mode, and the interaction mode. */
@@ -701,6 +828,39 @@ class InteractiveApp {
 	}
 
 	/**
+	 * `/sandbox on|net|off`, or `/sandbox` to show what bash may do. Applies from the next command, including the
+	 * supervisor's checks. Not saved with the session: each start takes the level from models.yml, so an `off` meant
+	 * for one task does not carry into an overnight run.
+	 */
+	private switchSandbox(arg: string): void {
+		if (!sandboxAvailable()) {
+			this.notice(style.yellow("The sandbox needs macOS: /usr/bin/sandbox-exec is missing."));
+			return;
+		}
+		const choice = arg.trim().toLowerCase();
+		if (choice && !isSandboxLevel(choice)) {
+			this.notice(style.yellow("Use /sandbox on, /sandbox net, or /sandbox off."));
+			return;
+		}
+		const policy = choice
+			? sandboxPolicy(choice as SandboxLevel, this.options.cwd, this.options.config.sandbox?.writable)
+			: currentSandbox();
+		if (choice) setSandbox(policy);
+		const note = choice && this.agent.isRunning ? " (from the next command)" : "";
+		if (!policy) {
+			this.notice(style.gray(`Sandbox off${note}: commands can write anywhere and reach the internet.`));
+		} else {
+			const reach = policy.level === "on" ? "reach only localhost" : "reach the internet";
+			const others = policy.writableRoots.filter((root) => root !== policy.project).join(", ");
+			this.notice(
+				style.gray(`Sandbox ${policy.level}${note}: commands ${reach} and write only in ${policy.project}`) +
+					style.gray(`, and ${others}.`),
+			);
+		}
+		this.updateFooter();
+	}
+
+	/**
 	 * `/rag on`, `/rag off`, or `/rag` to switch: give the model kb_search over the models.yml `rag:` archives.
 	 * kiwix-serve starts here rather than at the first search, so a missing binary or an empty folder shows now.
 	 */
@@ -737,8 +897,24 @@ class InteractiveApp {
 		if (this.agent.model) this.session?.updateSettings(this.sessionSettings(this.agent.model));
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		if (rag) {
-			this.notice(style.gray(`Knowledge base on${note}: ${archives} archives the model can search with kb_search.`));
-			knowledgeBase.start().catch((error: unknown) => this.notice(style.red(`Knowledge base: ${errorText(error)}`)));
+			const shelves = knowledgeBase.shelves.length;
+			const onShelves = shelves > 0 ? ` on ${shelves} shelves` : "";
+			this.notice(
+				style.gray(
+					`Knowledge base on${note}: ${archives} archives${onShelves} the model can search with kb_search.`,
+				),
+			);
+			if (knowledgeBase.shelfError) {
+				this.notice(style.yellow(`No shelves: ${knowledgeBase.shelfError} Searches cover every archive.`));
+			}
+			knowledgeBase
+				.missingShelfBooks()
+				.then((missing) => {
+					if (missing.length > 0) {
+						this.notice(style.yellow(`${SHELVES_FILE} names archives the folder lacks: ${missing.join(", ")}.`));
+					}
+				})
+				.catch((error: unknown) => this.notice(style.red(`Knowledge base: ${errorText(error)}`)));
 		} else {
 			// A search in flight would fail if kiwix-serve went away under it; it stops with the app instead.
 			if (!this.agent.isRunning) knowledgeBase.stop();
@@ -774,6 +950,55 @@ class InteractiveApp {
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		this.notice(style.gray(level === "off" ? `Ponytail off${note}.` : `Ponytail ${level}${note}.`));
 		this.updateFooter();
+	}
+
+	private changeDirectory(args: string): void {
+		if (!this.requireIdle()) return;
+		const pathArg = args.trim();
+		if (!pathArg) {
+			this.notice(style.yellow("Usage: /cd <path>"));
+			return;
+		}
+
+		const newPath = resolve(this.options.cwd, pathArg);
+		let isDirectory = false;
+		try {
+			isDirectory = statSync(newPath).isDirectory();
+		} catch {
+			this.notice(style.red(`Directory not found: ${newPath}`));
+			return;
+		}
+		if (!isDirectory) {
+			this.notice(style.red(`Not a directory: ${newPath}`));
+			return;
+		}
+
+		const oldPath = this.options.cwd;
+		if (newPath === oldPath) {
+			this.notice(style.gray(`Already in ${newPath}`));
+			return;
+		}
+
+		// Close out old session
+		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
+		this.notice(style.gray(`Session continued in ${newPath}`));
+
+		// Update paths
+		this.options.cwd = newPath;
+		this.agent.setCwd(newPath);
+		if (this.agent.model) {
+			this.agent.tools = createToolsForModel(this.agent.model, this.options.cwd, this.toolOptions());
+		}
+		this.editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(slashCommands(this.options.config.models), this.options.cwd),
+		);
+
+		// Start new session using existing clear logic, which also wipes the UI
+		this.newSession();
+
+		// Then post the breadcrumb in the new session
+		this.notice(style.gray(`Session continued from ${oldPath}`));
+		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
 	}
 
 	private switchInteractionMode(mode: InteractionMode): void {
@@ -1150,6 +1375,151 @@ class InteractiveApp {
 		};
 	}
 
+	// Tests
+
+	/**
+	 * `/test eval|workbench|all [quick] [resume]` benchmarks the loaded model with the suites in models.yml's
+	 * `tests.folder`, one after another; `/test stop` ends a run. The model stays loaded and the suites use its
+	 * server, so nothing reloads. Messages typed meanwhile wait until the run ends.
+	 */
+	private async testCommand(args: string): Promise<void> {
+		const arg = args.trim().toLowerCase();
+		if (arg === "stop") {
+			if (this.testRun) this.testRun.abort();
+			else this.notice(style.gray("No test is running."));
+			return;
+		}
+		const folder = this.options.config.tests?.folder;
+		if (!folder) {
+			this.notice(
+				style.yellow(
+					"No test suites are set up. Add this to models.yml:\n  tests:\n    folder: <folder holding Eval/ and Work_Bench/>",
+				),
+			);
+			return;
+		}
+		const parsed = parseTestArgs(arg);
+		if ("error" in parsed) {
+			this.notice(style.yellow(parsed.error));
+			return;
+		}
+		if (!this.requireIdle()) return;
+		if (!this.agent.model) {
+			this.notice(style.yellow("Pick the model to test with /model first."));
+			this.pickModel();
+			return;
+		}
+
+		const controller = new AbortController();
+		this.testRun = controller;
+		this.busy = true;
+		try {
+			// The suites use the server Arc runs, so start it now if no prompt has yet.
+			if (!(await this.ensureServer()) || controller.signal.aborted) {
+				if (!controller.signal.aborted) this.notice(style.red("The model did not load, so no test ran."));
+				return;
+			}
+			for (const [index, suite] of parsed.suites.entries()) {
+				// An hours-long suite leaves much of the server's memory in swap: the next suite starts on a fresh one.
+				// Only a server Arc started can be restarted; a discovered one belongs to someone else.
+				if (index > 0 && !controller.signal.aborted && this.options.manager.ownsServer) {
+					this.notice(style.gray("Restarting llama-server to release its memory before the next suite."));
+					await this.options.manager.stop();
+					if (!(await this.ensureServer()) || controller.signal.aborted) break;
+				}
+				const model = this.agent.model;
+				if (controller.signal.aborted || !model) break;
+				const run = suiteCommand(folder, suite, model, this.agent.mode, this.options.config.path, parsed.options);
+				if ("error" in run) this.notice(style.red(run.error));
+				else await this.runTestSuite(run, parsed.options.quick, controller.signal);
+			}
+		} finally {
+			this.testRun = undefined;
+			this.busy = false;
+			this.setStatus(undefined);
+			this.setAiStatus("idle");
+		}
+		if (this.pending.length > 0) {
+			const next = this.pending.join("\n\n");
+			this.pending = [];
+			void this.runPrompt(next);
+		}
+	}
+
+	/** Run one suite with its output in the transcript, then show and open its report. */
+	private async runTestSuite(run: SuiteCommand, quick: boolean, signal: AbortSignal): Promise<void> {
+		const label = this.agent.model ? modelLabel(this.agent.model) : "the model";
+		this.notice(style.bold(`${run.title}${quick ? " (quick)" : ""}: testing ${label} in ${this.agent.mode} mode`));
+		const started = Date.now();
+		let passed = 0;
+		let failed = 0;
+		let task = "";
+		const showStatus = () => {
+			const counts = passed + failed > 0 ? ` · ${passed} passed, ${failed} failed` : "";
+			this.setStatus(`Testing ${run.title}${task ? ` · ${task}` : ""}${counts}`, "esc to stop the test", started);
+		};
+		showStatus();
+		this.setAiStatus("working");
+		const result = await runSuite(
+			run,
+			(line) => {
+				const progress = progressIn(line);
+				if (progress && "pass" in progress) {
+					if (progress.pass) passed++;
+					else failed++;
+					showStatus();
+				} else if (progress) {
+					task = progress.task;
+					showStatus();
+				}
+				const text = line.trimEnd();
+				this.notice(
+					/^PASS /.test(text)
+						? style.green(text)
+						: /^(FAIL |error:)/.test(text)
+							? style.red(text)
+							: style.gray(text),
+				);
+			},
+			signal,
+			(partial) => {
+				const progress = progressIn(partial);
+				if (progress && "task" in progress && progress.task !== task) {
+					task = progress.task;
+					showStatus();
+				}
+			},
+		);
+		const took = formatDuration(Date.now() - started);
+		if (signal.aborted) {
+			this.notice(
+				style.yellow(
+					`${run.title} stopped after ${took}. ${
+						run.suite === "eval"
+							? "Run the same /test today to continue where it stopped."
+							: "/test workbench resume continues it."
+					}`,
+				),
+			);
+			return;
+		}
+		// Eval exits 2 when some cases failed: the run itself completed.
+		const completed = result.code === 0 || (run.suite === "eval" && result.code === 2);
+		this.notice(
+			completed
+				? style.green(`${run.title} finished in ${took}.`)
+				: style.red(`${run.title} ended with exit code ${result.code ?? "unknown"} after ${took}.`),
+		);
+		const report = result.reports.find((entry) => entry.thisRun);
+		if (report) {
+			this.notice(style.gray(`Report: ${report.path} (opening it)`));
+			openReport(report.path);
+		}
+		const dashboard = result.reports.find((entry) => !entry.thisRun);
+		if (dashboard) this.notice(style.gray(`All runs compared: ${dashboard.path}`));
+		notify(`${run.title} ${completed ? "finished" : "stopped"} for ${label}`, "Arc Test");
+	}
+
 	/** `/usage`: the tokens this session's replies used, and the critic's while supervising. */
 	private showUsage(): void {
 		const actor = tallyUsage(this.agent.messages);
@@ -1188,7 +1558,9 @@ class InteractiveApp {
 			style.yellow(
 				this.supervisorRun
 					? "The supervisor is running. /supervise stop or esc stops it."
-					: "Wait for the current request to finish, or press esc to abort it.",
+					: this.testRun
+						? "A test is running. /test stop or esc stops it."
+						: "Wait for the current request to finish, or press esc to abort it.",
 			),
 		);
 		return false;
@@ -1286,7 +1658,9 @@ class InteractiveApp {
 				this.notice(style.red(`Nothing is serving at ${origin}. Start llama-server there, then try again.`));
 				return false;
 			}
-			const model = resolveDiscoveredModel(placeholder, props);
+			const chosen = props.listed ? await this.pickListed(placeholder, props) : props;
+			if (!chosen) return false;
+			const model = resolveDiscoveredModel(placeholder, chosen);
 			this.adoptModel(model, this.connectMode);
 			this.connectMode = undefined;
 			this.notice(style.gray(describeDiscovered(model, props, origin)));
@@ -1295,6 +1669,33 @@ class InteractiveApp {
 			this.setStatus(undefined);
 			if (!this.agent.isRunning) this.setAiStatus("idle");
 		}
+	}
+
+	/**
+	 * A server that lists several models, such as TinyTitan's router, loads whichever a request names, so ask which
+	 * one to use. The one already in use is listed first. Undefined when the picker is dismissed.
+	 */
+	private pickListed(placeholder: LiteModel, props: ServerProps): Promise<ServerProps | undefined> {
+		this.setStatus(undefined);
+		this.setAiStatus("idle");
+		const listed = props.listed ?? [];
+		const current = this.agent.model?.name === placeholder.name ? this.agent.model.servedModel : undefined;
+		const ordered = [...listed].sort((a, b) => Number(b.id === current) - Number(a.id === current));
+		const items: SelectItem[] = ordered.map((model) => ({
+			value: model.id,
+			label: model.id === current ? `${model.id} (current)` : model.id,
+		}));
+		return new Promise((resolve) => {
+			this.pick(
+				`${placeholder.name} serves ${listed.length} models`,
+				items,
+				(id) => {
+					const model = listed.find((entry) => entry.id === id);
+					resolve(model ? listedProps(model) : undefined);
+				},
+				() => resolve(undefined),
+			);
+		});
 	}
 
 	/** Everything that changes when a model becomes the current one, once it is fully known. */
@@ -1540,6 +1941,7 @@ class InteractiveApp {
 	/** `/clear`, also reached as `/new`, `/cls`, and `/reset`. */
 	private newSession(): void {
 		if (!this.requireIdle()) return;
+		this.saveMemory();
 		this.agent.setMessages([]);
 		this.supervisor = undefined;
 		this.sessionName = undefined;
@@ -1639,6 +2041,7 @@ class InteractiveApp {
 		const model = savedModel ?? this.agent.model;
 		const modelChanged = model?.name !== this.agent.model?.name;
 
+		this.saveMemory();
 		this.agent.setMessages(loaded.messages);
 		this.sessionName = loaded.name;
 		this.supervisor = this.restoredSupervisor(loaded.supervisor);
@@ -1664,7 +2067,7 @@ class InteractiveApp {
 	}
 
 	/** Temporarily put a picker where the editor is. */
-	private pick(title: string, items: SelectItem[], onSelect: (value: string) => void): void {
+	private pick(title: string, items: SelectItem[], onSelect: (value: string) => void, onCancel?: () => void): void {
 		const list = new SelectList(items, Math.min(items.length, 10), selectListTheme, {
 			minPrimaryColumnWidth: 12,
 			maxPrimaryColumnWidth: 72,
@@ -1680,7 +2083,10 @@ class InteractiveApp {
 			close();
 			onSelect(item.value);
 		};
-		list.onCancel = close;
+		list.onCancel = () => {
+			close();
+			onCancel?.();
+		};
 		this.picking = true;
 		this.editorSlot.clear();
 		this.editorSlot.addChild(new Text(style.bold(title), 1, 0));
@@ -1755,8 +2161,11 @@ class InteractiveApp {
 	}
 
 	/** Show a status above the editor, with elapsed seconds repainted once per second. */
-	/** @param hint what esc does now, shown after the elapsed time. */
-	private setStatus(label: string | undefined, hint = "esc to abort"): void {
+	/**
+	 * @param hint what esc does now, shown after the elapsed time.
+	 * @param started when the work began, to keep counting across label changes.
+	 */
+	private setStatus(label: string | undefined, hint = "esc to abort", started = Date.now()): void {
 		clearInterval(this.statusTimer);
 		this.statusTimer = undefined;
 		if (!label) {
@@ -1764,7 +2173,6 @@ class InteractiveApp {
 			this.tui.requestRender();
 			return;
 		}
-		const started = Date.now();
 		const paint = () => {
 			const elapsed = formatDuration(Math.floor((Date.now() - started) / 1000) * 1000);
 			const queued = this.pending.length + this.agent.queuedMessages.length;
@@ -1783,6 +2191,7 @@ class InteractiveApp {
 				mode: this.agent.mode,
 				interactionMode: this.agent.interactionMode,
 				web: this.agent.web,
+				sandbox: sandboxAvailable() ? (currentSandbox()?.level ?? "off") : undefined,
 				rag: this.agent.rag,
 				ponytail: this.agent.ponytail,
 				supervisor: this.supervisor?.state,
@@ -1803,6 +2212,7 @@ class InteractiveApp {
 			void this.stopServe();
 		}
 		this.knowledgeBase?.stop();
+		this.saveMemory();
 		// Leave the final frame on screen as it is now (for example with the submitted /quit cleared).
 		this.status.setText("");
 		this.tui.renderNow();
@@ -1819,10 +2229,10 @@ class InteractiveApp {
 }
 
 /** A macOS notification, for a person away from the terminal. Elsewhere, or if it fails, nothing happens. */
-function notify(text: string): void {
+function notify(text: string, title = "Arc Supervisor"): void {
 	if (process.platform !== "darwin") return;
 	const quoted = text.replace(/["\\]/g, "");
-	execFile("osascript", ["-e", `display notification "${quoted}" with title "Arc Supervisor"`], () => {});
+	execFile("osascript", ["-e", `display notification "${quoted}" with title "${title}"`], () => {});
 }
 
 /** A `discover` entry that has not been connected yet: it still names no GGUF. */

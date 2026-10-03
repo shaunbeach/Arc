@@ -4,6 +4,7 @@ import type { AgentTool } from "../agent/types.ts";
 import { runShellCommand, type ShellRunResult } from "./child-process.ts";
 import type { CodingToolOptions } from "./options.ts";
 import { OutputBuffer } from "./output-buffer.ts";
+import { sandboxNote } from "./sandbox.ts";
 import type { TruncationResult } from "./truncate.ts";
 
 /** Output longer than this is also saved to a file, so the model can search it instead of running it again. */
@@ -81,6 +82,8 @@ export function createBashTool(options: CodingToolOptions): AgentTool<typeof bas
 				const notice = `[${shown}. Search it with grep instead of running the command again.]`;
 				text = text ? `${text}\n\n${notice}` : notice;
 			}
+			const note = sandboxNote(text);
+			if (note) text = `${text}\n\n${note}`;
 			const failure = (status: string) => new Error(text ? `${text}\n\n${status}` : status);
 			if (signal?.aborted) throw failure("Command aborted");
 			if (result.timedOut) throw failure(`Command timed out after ${timeout} seconds`);

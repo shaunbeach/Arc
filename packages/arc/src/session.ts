@@ -76,7 +76,9 @@ export type SessionEvent =
 	/** Processes the actor's or the checks' commands left running, stopped by the supervisor. */
 	| { kind: "leftovers"; count: number }
 	/** Swap in use reached a new high during a run. */
-	| { kind: "swap"; usedBytes: number };
+	| { kind: "swap"; usedBytes: number }
+	/** The user changed the working directory with /cd. */
+	| { kind: "cd"; from: string; to: string };
 
 export interface LoadedSession {
 	path: string;

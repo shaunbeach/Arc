@@ -67,6 +67,58 @@ describe("read", () => {
 		);
 	});
 
+	describe("files over 10MB, read only up to the page", () => {
+		// About 11MB: "line N" padded to 100 bytes per line.
+		const LINES = 110_000;
+		const bigFile = (options: CodingToolOptions, tail = "") => {
+			const lines = Array.from({ length: LINES }, (_, i) => `line ${i + 1}`.padEnd(99, "."));
+			writeFileSync(join(options.cwd, "big.log"), `${lines.join("\n")}\n${tail}`);
+		};
+
+		it("pages with offset and limit, and names the file size in the hint", async () => {
+			const options = setup();
+			bigFile(options);
+			const read = createReadTool(options);
+			const page = text(await run(read, { path: "big.log", offset: 50_000, limit: 2 }));
+			expect(page).toMatch(
+				/^line 50000\.+\nline 50001\.+\n\n\[Showing lines 50000-50001 of a 10\.5MB file\. Use offset=50002 to continue\.\]$/,
+			);
+			expect(text(await run(read, { path: "big.log", offset: LINES }))).toBe(`line ${LINES}`.padEnd(99, "."));
+		});
+
+		it("cuts at the byte limit", async () => {
+			const options = setup({ maxLines: 2000, maxBytes: 1000 });
+			bigFile(options);
+			const page = text(await run(createReadTool(options), { path: "big.log" }));
+			// Ten 99-byte lines and nine newlines fit in 1000 bytes.
+			expect(page.endsWith("[Showing lines 1-10 of a 10.5MB file. Use offset=11 to continue.]")).toBe(true);
+		});
+
+		it("rejects an offset past the end with the line count", async () => {
+			const options = setup();
+			bigFile(options);
+			await expect(run(createReadTool(options), { path: "big.log", offset: LINES + 5 })).rejects.toThrow(
+				`offset ${LINES + 5} is past the end of big.log (${LINES} lines).`,
+			);
+		});
+
+		it("points to bash for a line over the limit without holding it", async () => {
+			const options = setup();
+			bigFile(options, "x".repeat(200_000));
+			expect(text(await run(createReadTool(options), { path: "big.log", offset: LINES + 1 }))).toBe(
+				`[Line ${LINES + 1} is over the 50.0KB limit. Use bash: sed -n '${LINES + 1}p' big.log | cut -c1-2000]`,
+			);
+		});
+
+		it("reports a binary file", async () => {
+			const options = setup();
+			writeFileSync(join(options.cwd, "big.bin"), Buffer.alloc(11 * 1024 * 1024));
+			expect(text(await run(createReadTool(options), { path: "big.bin" }))).toBe(
+				"[Binary file, 11.0MB. Not shown.]",
+			);
+		});
+	});
+
 	it("lists a directory", async () => {
 		const options = setup();
 		mkdirSync(join(options.cwd, "sub"));

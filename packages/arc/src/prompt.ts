@@ -12,8 +12,8 @@ export function isInteractionMode(value: string): value is InteractionMode {
 
 /** Tools each restricted mode exposes. Agent mode exposes all registered tools. */
 export const TOOLS_BY_MODE: Record<"plan" | "chat", readonly string[]> = {
-	plan: ["read", "web_search", "web_fetch", "kb_search"],
-	chat: ["web_search", "web_fetch", "kb_search"],
+	plan: ["read", "web_search", "web_fetch", "kb_search", "memory"],
+	chat: ["web_search", "web_fetch", "kb_search", "memory"],
 };
 
 /** The tools `/web off` takes away in every mode. */

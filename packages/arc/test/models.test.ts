@@ -262,6 +262,19 @@ describe("supervisor", () => {
 	});
 });
 
+describe("tests", () => {
+	it("resolves the suites folder against models.yml's folder, and warns when it is missing", () => {
+		const config = parse(`${CONFIG}\ntests:\n  folder: suites`);
+		expect(config.tests).toEqual({ folder: "/cfg/suites" });
+		expect(config.warnings).toContain("tests.folder not found: /cfg/suites");
+		expect(parse(CONFIG).tests).toBeUndefined();
+	});
+
+	it("needs a folder", () => {
+		expect(() => parse(`${CONFIG}\ntests:\n  other: 1`)).toThrow(/tests.folder is required/);
+	});
+});
+
 describe("findModel", () => {
 	const { models } = parse(CONFIG);
 

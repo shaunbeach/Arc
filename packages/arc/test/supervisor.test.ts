@@ -5,17 +5,26 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { LiteModel } from "../src/config/models.ts";
 import type { AssistantMessage, ToolCall } from "../src/llm/types.ts";
-import { asCritic, askCritic, buildVerdictGBNF, CRITIC_CONTEXT, parseVerdict } from "../src/supervisor/critic.ts";
+import {
+	asCritic,
+	askCritic,
+	buildVerdictGBNF,
+	CRITIC_CONTEXT,
+	formatCriticPrompt,
+	parseVerdict,
+} from "../src/supervisor/critic.ts";
 import { formatChecks, runChecks } from "../src/supervisor/gate.ts";
 import {
 	changedFiles,
 	commitPhase,
 	diffBudgetChars,
 	diffSince,
+	diffTrees,
 	EMPTY_TREE,
 	isClean,
 	passedPhases,
 	phaseStartRef,
+	snapshotTree,
 } from "../src/supervisor/git.ts";
 import { RepeatGuard } from "../src/supervisor/guard.ts";
 import { formatLint, lintPlan } from "../src/supervisor/lint.ts";
@@ -168,6 +177,38 @@ describe("git", () => {
 			expect(diff.text).toContain("package-lock.json: dependency lock file changed; contents left out.");
 			expect(diff.text).not.toContain("lockfileVersion");
 			expect(diff.text).toContain("+module.exports = 1;");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("snapshots the working tree without touching the index, and diffs two snapshots", async () => {
+		const dir = repo();
+		try {
+			writeFileSync(join(dir, "kept.txt"), "one\n");
+			const start = await commitPhase(dir, 1, "Start");
+			writeFileSync(join(dir, "kept.txt"), "two\n");
+			writeFileSync(join(dir, "same.txt"), "untracked, unchanged\n");
+			writeFileSync(join(dir, ".gitignore"), "ignored.txt\n");
+			writeFileSync(join(dir, "ignored.txt"), "x\n");
+			const first = await snapshotTree(dir);
+			writeFileSync(join(dir, "kept.txt"), "three\n");
+			writeFileSync(join(dir, "fix.txt"), "new\n");
+			const second = await snapshotTree(dir);
+
+			const fix = await diffTrees(dir, first, second, 100_000);
+			expect(fix.text).toContain("Changed files (2):\nA fix.txt\nM kept.txt");
+			expect(fix.text).toContain("-two\n+three");
+			expect(fix.text).not.toContain("same.txt");
+			expect(fix.text).not.toContain("ignored.txt");
+			// The real index still holds only the committed files.
+			expect(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: dir }).toString()).toBe("");
+			expect((await changedFiles(dir, start)).map((file) => file.path)).toEqual([
+				".gitignore",
+				"fix.txt",
+				"kept.txt",
+				"same.txt",
+			]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -326,6 +367,18 @@ describe("critic", () => {
 			prompt_string: "<templated>",
 			multimodal_data: [Buffer.from("png-bytes").toString("base64")],
 		});
+	});
+
+	it("asks a re-review to judge the earlier reasons against the changes since", () => {
+		const earlier = { reasons: ["settings.ts: no save button"], diff: "Changed files (1):\nM settings.ts" };
+		const { parts } = formatCriticPrompt({ ...request, earlier }, false);
+		expect(parts[0]).toContain("Changes since the earlier review:\n\nChanged files (1):\nM settings.ts");
+		expect(parts[1]).toContain(
+			"This is a re-review. An earlier review failed this phase for these reasons:\n- settings.ts: no save button",
+		);
+		expect(parts[1]).toMatch(/Reply with the JSON verdict\.$/);
+		const first = formatCriticPrompt(request, false);
+		expect(first.parts.join("\n")).not.toMatch(/re-review|earlier review/);
 	});
 
 	it("fails the phase when the reply cannot be read", async () => {
