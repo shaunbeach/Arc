@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { totalmem } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -77,7 +77,7 @@ import {
 	startState,
 } from "../supervisor/supervisor.ts";
 import { openReport, parseTestArgs, progressIn, runSuite, type SuiteCommand, suiteCommand } from "../test-suite.ts";
-import { killLeftoverProcesses, setLeftoverLimit } from "../tools/child-process.ts";
+import { killLeftoverProcesses, runShellCommand, setLeftoverLimit } from "../tools/child-process.ts";
 import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
 import {
 	currentSandbox,
@@ -362,6 +362,10 @@ class InteractiveApp {
 		const command = parseCommand(input);
 		if (command) {
 			this.runCommand(command.name, command.args);
+		} else if (input.startsWith("!!")) {
+			this.runInteractiveCommand(input.slice(2).trim());
+		} else if (input.startsWith("!")) {
+			void this.runCapturedCommand(input.slice(1).trim());
 		} else if (this.isServing) {
 			this.notice(style.yellow("Currently serving a model. Press esc to stop serving before sending prompts."));
 		} else if (!this.agent.model) {
@@ -377,6 +381,54 @@ class InteractiveApp {
 			this.notice(style.gray(`queued: ${input}`));
 		} else {
 			void this.runPrompt(input);
+		}
+	}
+
+	private runInteractiveCommand(cmd: string): void {
+		if (!cmd) return;
+		this.tui.stop();
+		console.clear();
+		try {
+			spawnSync(cmd, { shell: true, stdio: "inherit", cwd: this.options.cwd });
+		} catch (error) {
+			console.error(error);
+		}
+		// Pause briefly to let the user see the output if it exited immediately
+		console.log("\nPress Enter to return to Arc...");
+		try {
+			const buffer = Buffer.alloc(1);
+			import("node:fs").then(({ readSync }) => readSync(0, buffer, 0, 1, null)).catch(() => {});
+		} catch {}
+
+		this.tui.start();
+		this.tui.requestRender(true);
+		this.notice(style.gray(`Ran interactive command: ${cmd}`));
+	}
+
+	private async runCapturedCommand(cmd: string): Promise<void> {
+		if (!cmd) return;
+		if (!this.requireIdle()) return;
+
+		this.setAiStatus("working");
+		this.notice(style.gray(`Running: ${cmd}`));
+		this.tui.requestRender();
+
+		try {
+			const chunks: Buffer[] = [];
+			const _result = await runShellCommand(cmd, this.options.cwd, {
+				onData: (data) => chunks.push(data),
+			});
+
+			let output = Buffer.concat(chunks).toString("utf8");
+			if (!output.trim()) output = "(No output)";
+
+			// Inject into the LLM context by executing a prompt with the output
+			const prompt = `I ran \`${cmd}\` and got this output:\n\`\`\`\n${output}\n\`\`\``;
+			void this.runPrompt(prompt, false);
+		} catch (error) {
+			this.notice(style.red(`Failed to run ${cmd}: ${error}`));
+			this.setAiStatus("idle");
+			this.tui.requestRender();
 		}
 	}
 
@@ -619,6 +671,9 @@ class InteractiveApp {
 
 	private runCommand(name: CommandName, args: string): void {
 		switch (name) {
+			case "cd":
+				this.changeDirectory(args);
+				return;
 			case "agent":
 			case "plan":
 			case "chat":
@@ -895,6 +950,55 @@ class InteractiveApp {
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		this.notice(style.gray(level === "off" ? `Ponytail off${note}.` : `Ponytail ${level}${note}.`));
 		this.updateFooter();
+	}
+
+	private changeDirectory(args: string): void {
+		if (!this.requireIdle()) return;
+		const pathArg = args.trim();
+		if (!pathArg) {
+			this.notice(style.yellow("Usage: /cd <path>"));
+			return;
+		}
+
+		const newPath = resolve(this.options.cwd, pathArg);
+		let isDirectory = false;
+		try {
+			isDirectory = statSync(newPath).isDirectory();
+		} catch {
+			this.notice(style.red(`Directory not found: ${newPath}`));
+			return;
+		}
+		if (!isDirectory) {
+			this.notice(style.red(`Not a directory: ${newPath}`));
+			return;
+		}
+
+		const oldPath = this.options.cwd;
+		if (newPath === oldPath) {
+			this.notice(style.gray(`Already in ${newPath}`));
+			return;
+		}
+
+		// Close out old session
+		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
+		this.notice(style.gray(`Session continued in ${newPath}`));
+
+		// Update paths
+		this.options.cwd = newPath;
+		this.agent.setCwd(newPath);
+		if (this.agent.model) {
+			this.agent.tools = createToolsForModel(this.agent.model, this.options.cwd, this.toolOptions());
+		}
+		this.editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(slashCommands(this.options.config.models), this.options.cwd),
+		);
+
+		// Start new session using existing clear logic, which also wipes the UI
+		this.newSession();
+
+		// Then post the breadcrumb in the new session
+		this.notice(style.gray(`Session continued from ${oldPath}`));
+		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
 	}
 
 	private switchInteractionMode(mode: InteractionMode): void {

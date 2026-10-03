@@ -25,6 +25,7 @@ export type CommandName =
 	| "audit"
 	| "usage"
 	| "test"
+	| "cd"
 	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
@@ -76,6 +77,7 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 		description: "Benchmark the loaded model with the test suites in models.yml",
 		argumentHint: "[eval|workbench|all] [quick] | stop",
 	},
+	{ name: "cd", description: "Change working directory", argumentHint: "<path>" },
 	{ name: "quit", description: "Exit" },
 ];
 
