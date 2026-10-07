@@ -1361,7 +1361,7 @@ class InteractiveApp {
 			return;
 		}
 		if (!this.agent.model) return refuse("Pick the actor with /model first.");
-		if (this.agent.model.name === config.critic) return refuse("The actor and the critic must be different models.");
+
 		if (this.agent.interactionMode !== "agent") return refuse("The actor needs its tools. Switch with /agent first.");
 		const plan = resolve(cwd, planArg);
 		if (!existsSync(plan)) return refuse(`No plan at ${plan}.`);
