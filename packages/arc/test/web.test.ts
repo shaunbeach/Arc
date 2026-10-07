@@ -198,12 +198,12 @@ describe("interaction modes and tool filtering", () => {
 		expect(agent.activeTools.map((t) => t.name)).toEqual(["read", "web_search", "web_fetch", "kb_search"]);
 		agent.setInteractionMode("chat");
 		agent.setWeb(false);
-		expect(agent.activeTools.map((t) => t.name)).toEqual(["kb_search"]);
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read", "kb_search"]);
 		expect(agent.systemPrompt).not.toContain("no tools");
 		expect(agent.systemPrompt).toContain("no web access");
 
 		agent.setRag(false);
-		expect(agent.activeTools).toEqual([]);
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read"]);
 	});
 
 	it("filters tools appropriately in plan and chat modes", () => {
@@ -232,18 +232,18 @@ describe("interaction modes and tool filtering", () => {
 
 		agent.setInteractionMode("chat");
 		expect(agent.interactionMode).toBe("chat");
-		expect(agent.activeTools.map((t) => t.name)).toEqual(["web_search", "web_fetch"]);
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read", "web_search", "web_fetch"]);
 		expect(agent.systemPrompt).toContain("conversational assistant");
 
 		// /web off takes the web tools away in every mode, and the prompt stops offering them.
 		agent.setWeb(false);
-		expect(agent.activeTools).toEqual([]);
-		expect(agent.systemPrompt).toContain("no tools and no web access");
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read"]);
+		expect(agent.systemPrompt).toContain("no web access in this session");
 		agent.setInteractionMode("plan");
 		expect(agent.activeTools.map((t) => t.name)).toEqual(["read"]);
 		agent.setInteractionMode("chat");
 		agent.setWeb(true);
-		expect(agent.activeTools.map((t) => t.name)).toEqual(["web_search", "web_fetch"]);
+		expect(agent.activeTools.map((t) => t.name)).toEqual(["read", "web_search", "web_fetch"]);
 
 		agent.setInteractionMode("agent");
 		expect(agent.interactionMode).toBe("agent");

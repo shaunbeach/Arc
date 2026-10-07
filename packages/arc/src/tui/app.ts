@@ -37,6 +37,7 @@ import {
 } from "../llm/swap-monitor.ts";
 import { userText } from "../llm/text.ts";
 import type { AssistantMessage, Message } from "../llm/types.ts";
+import { McpManager } from "../mcp/manager.ts";
 import { isPonytailLevel, PONYTAIL_LEVEL_RULES, PONYTAIL_LEVELS } from "../ponytail.ts";
 import type { InteractionMode } from "../prompt.ts";
 import { KiwixKnowledgeBase, SHELVES_FILE } from "../rag/kiwix.ts";
@@ -173,6 +174,7 @@ class InteractiveApp {
 	private readonly knowledgeBase: KiwixKnowledgeBase | undefined;
 	/** This project's MemPalace wing, from `.arc/mempalace.json`. Sessions are saved there and the memory tool searches it. */
 	private memoryWing: string | undefined;
+	private mcpManager: McpManager;
 	private readonly tui = new TuiMainScreen(new ProcessTerminal());
 	private readonly chat = new Container();
 	/**
@@ -198,6 +200,7 @@ class InteractiveApp {
 	private readonly toolViews = new Map<string, ToolView>();
 	/** Messages typed while llama-server was starting, sent once the current prompt finishes. */
 	private pending: string[] = [];
+	private forceNextPrompt = false;
 	/** True from submitting a prompt until the agent and its follow-ups finish. */
 	private busy = false;
 	private aiStatus: AiStatus = "idle";
@@ -246,6 +249,7 @@ class InteractiveApp {
 			process.once("exit", () => knowledgeBase.stop());
 		}
 		this.memoryWing = readMemoryWing(cwd);
+		this.mcpManager = new McpManager(cwd);
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
 		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
@@ -275,6 +279,7 @@ class InteractiveApp {
 		this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 });
 		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands(options.config.models), cwd));
 		this.editor.onSubmit = (text) => this.submit(text);
+		this.editor.onSubmitForce = (text) => this.submitForce(text);
 		this.editorSlot.addChild(this.editor);
 
 		this.tui.addChild(this.chat);
@@ -351,6 +356,20 @@ class InteractiveApp {
 			return { consume: true };
 		}
 		return undefined;
+	}
+
+	private submitForce(text: string): void {
+		const input = text.trim();
+		if (!input) return;
+		if (this.agent.isRunning || this.busy || this.supervisorRun) {
+			this.editor.setText("");
+			this.editor.addToHistory(input);
+			this.forceNextPrompt = true;
+			this.agent.enqueue(input);
+			this.abort();
+		} else {
+			this.submit(text);
+		}
 	}
 
 	private submit(text: string): void {
@@ -432,6 +451,66 @@ class InteractiveApp {
 		}
 	}
 
+	private formatTranscript(): string {
+		let out = "";
+		for (const msg of this.agent.messages) {
+			if (msg.role === "user") {
+				out += `## User\n\n${userText(msg)}\n\n`;
+			} else if (msg.role === "assistant") {
+				out += `## Assistant\n\n`;
+				for (const part of msg.content) {
+					if (part.type === "text") {
+						out += `${part.text}\n\n`;
+					} else if (part.type === "thinking") {
+						out += `> [!NOTE] Thinking\n> \n> ${part.thinking.replace(/\n/g, "\n> ")}\n\n`;
+					} else if (part.type === "toolCall") {
+						out += `### Tool Call: ${part.name}\n\`\`\`json\n${JSON.stringify(part.arguments, null, 2)}\n\`\`\`\n\n`;
+					}
+				}
+			} else if (msg.role === "toolResult") {
+				out += `## Tool Result: ${msg.toolName}\n\n`;
+				for (const part of msg.content) {
+					if (part.type === "text") {
+						out += `\`\`\`\n${part.text}\n\`\`\`\n\n`;
+					} else if (part.type === "image") {
+						out += `[Image: ${part.mimeType}]\n\n`;
+					}
+				}
+			}
+		}
+		return out.trim();
+	}
+
+	private exportTranscript(args: string): void {
+		const outPath = args.trim() || join(this.options.cwd, `arc-export-${Date.now()}.md`);
+		try {
+			writeFileSync(outPath, this.formatTranscript());
+			this.notice(style.gray(`Exported conversation to ${outPath}`));
+		} catch (error) {
+			this.notice(style.red(`Failed to export: ${error}`));
+		}
+	}
+
+	private showRawTranscript(): void {
+		this.tui.stop();
+		console.clear();
+		console.log(this.formatTranscript());
+		console.log("\nPress Enter to return to Arc...");
+		try {
+			const buffer = Buffer.alloc(1);
+			import("node:fs").then(({ readSync }) => readSync(0, buffer, 0, 1, null)).catch(() => {});
+		} catch {}
+		this.tui.start();
+		this.tui.requestRender(true);
+	}
+
+	private async recapConversation(): Promise<void> {
+		if (!this.requireIdle()) return;
+		const prompt =
+			"Please provide a concise recap of our conversation so far. Summarize our main goal, the steps we've taken, and what we're currently trying to resolve.";
+		void this.runPrompt(prompt);
+	}
+
 	private abort(): void {
 		this.agent.abort();
 		this.serverStart?.abort();
@@ -493,11 +572,12 @@ class InteractiveApp {
 				const queued = [...this.pending, ...this.agent.takeQueued().map(userText)];
 				this.pending = [];
 				if (queued.length === 0) break;
-				if (outcome === "aborted") {
+				if (outcome === "aborted" && !this.forceNextPrompt) {
 					// Do not run queued messages after an abort; hand them back for editing.
 					this.restoreQueued(queued.join("\n\n"));
 					break;
 				}
+				this.forceNextPrompt = false;
 				next = queued.join("\n\n");
 			}
 		} finally {
@@ -682,6 +762,12 @@ class InteractiveApp {
 			case "web":
 				this.switchWeb(args);
 				return;
+			case "browser":
+				this.switchBrowser(args);
+				return;
+			case "mcp":
+				void this.switchMcp(args);
+				return;
 			case "sandbox":
 				this.switchSandbox(args);
 				return;
@@ -733,6 +819,15 @@ class InteractiveApp {
 			case "test":
 				void this.testCommand(args);
 				return;
+			case "export":
+				this.exportTranscript(args);
+				return;
+			case "raw":
+				this.showRawTranscript();
+				return;
+			case "recap":
+				void this.recapConversation();
+				return;
 			case "quit":
 				this.stop();
 				return;
@@ -743,11 +838,12 @@ class InteractiveApp {
 	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
 	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
 	 */
-	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory"> {
+	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory" | "browser"> {
 		return {
 			allowLocalNetwork: () => this.agent.interactionMode === "agent",
 			knowledgeBase: this.knowledgeBase,
 			memory: this.memoryWing || palaceExists() ? { wing: this.memoryWing } : undefined,
+			browser: this.agent.browser,
 		};
 	}
 
@@ -824,6 +920,53 @@ class InteractiveApp {
 		this.notice(
 			style.gray(web ? `Web tools on${note}.` : `Web tools off${note}: the model cannot search or fetch pages.`),
 		);
+		this.updateFooter();
+	}
+
+	private switchBrowser(arg: string): void {
+		const choice = arg.trim().toLowerCase();
+		if (choice && choice !== "on" && choice !== "off") {
+			this.notice(style.yellow("Use /browser on, /browser off, or /browser to switch."));
+			return;
+		}
+		const browser = choice ? choice === "on" : !this.agent.browser;
+		if (browser === this.agent.browser) {
+			this.notice(style.gray(`Browser tools are already ${browser ? "on" : "off"}.`));
+			return;
+		}
+		this.agent.setBrowser(browser);
+		if (this.agent.model) {
+			this.agent.tools = createToolsForModel(this.agent.model, this.options.cwd, this.toolOptions());
+			this.session?.updateSettings(this.sessionSettings(this.agent.model));
+		}
+		const note = this.agent.isRunning ? " (from the next message)" : "";
+		this.notice(style.gray(browser ? `Browser tools on${note}.` : `Browser tools off${note}.`));
+		this.updateFooter();
+	}
+
+	private async switchMcp(arg: string): Promise<void> {
+		const choice = arg.trim().toLowerCase();
+		if (choice && choice !== "on" && choice !== "off") {
+			this.notice(style.yellow("Use /mcp on, /mcp off, or /mcp to switch."));
+			return;
+		}
+		const mcp = choice ? choice === "on" : !this.agent.mcp;
+		if (mcp === this.agent.mcp) {
+			this.notice(style.gray(`MCP tools are already ${mcp ? "on" : "off"}.`));
+			return;
+		}
+
+		if (mcp) {
+			this.notice(style.gray("Starting MCP servers..."));
+			this.tui.requestRender();
+			const tools = await this.mcpManager.startAll();
+			this.agent.setMcp(true, tools);
+			this.notice(style.gray(`MCP tools on. Loaded ${tools.length} tool(s).`));
+		} else {
+			this.agent.setMcp(false);
+			await this.mcpManager.stopAll();
+			this.notice(style.gray("MCP tools off."));
+		}
 		this.updateFooter();
 	}
 
@@ -2211,6 +2354,7 @@ class InteractiveApp {
 		if (this.isServing) {
 			void this.stopServe();
 		}
+		void this.mcpManager.stopAll();
 		this.knowledgeBase?.stop();
 		this.saveMemory();
 		// Leave the final frame on screen as it is now (for example with the submitted /quit cleared).
