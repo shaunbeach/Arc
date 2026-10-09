@@ -38,7 +38,7 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 
 	// Trim streamed partial closing fences so code blocks do not shrink/flicker
 	// when the final fence character arrives. See https://github.com/earendil-works/pi/issues/5825.
-	const marker = /^(`{3,}|~{3,})/.exec(token.raw)?.[1];
+	const marker = /^(`{3,}|~{3,}|\$\$)/.exec(token.raw)?.[1];
 	const lastLine = token.raw.split("\n").pop();
 	if (!marker || !lastLine || lastLine.length >= marker.length || lastLine !== marker[0]?.repeat(lastLine.length)) {
 		return;
@@ -47,10 +47,50 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
+const mathExtension = {
+	name: "math",
+	level: "block" as const,
+	start(src: string) {
+		return src.match(/\$\$/)?.index;
+	},
+	tokenizer(src: string) {
+		// Match block math (either $$ on its own line or wrapping content), optionally unclosed
+		const match = /^\$\$([\s\S]*?)(?:\$\$|$)/.exec(src);
+		if (match) {
+			return {
+				type: "code",
+				raw: match[0],
+				text: match[1].trim(),
+				lang: "latex",
+			};
+		}
+	},
+};
+
+const inlineMathExtension = {
+	name: "inlineMath",
+	level: "inline" as const,
+	start(src: string) {
+		return src.match(/\$/)?.index;
+	},
+	tokenizer(src: string) {
+		// Match inline math wrapped in $, optionally unclosed for streaming
+		const match = /^\$([^$\n]*?)(?:\$|$)/.exec(src);
+		if (match) {
+			return {
+				type: "codespan",
+				raw: match[0],
+				text: match[1].trim(),
+			};
+		}
+	},
+};
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
+markdownParser.use({ extensions: [mathExtension, inlineMathExtension] });
 
 /**
  * Default text styling for markdown content.
@@ -380,7 +420,12 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				const isMath = token.lang === "latex" || token.lang === "math";
+
+				if (!isMath) {
+					lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				}
+
 				if (this.theme.highlightCode) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
@@ -390,10 +435,18 @@ export class Markdown implements Component {
 					// Split code by newlines and style each line
 					const codeLines = token.text.split("\n");
 					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+						if (isMath && this.theme.code) {
+							lines.push(`${indent}${this.theme.code(codeLine)}`);
+						} else {
+							lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+						}
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
+
+				if (!isMath) {
+					lines.push(this.theme.codeBlockBorder("```"));
+				}
+
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
