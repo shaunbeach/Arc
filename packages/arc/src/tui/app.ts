@@ -275,6 +275,8 @@ class InteractiveApp {
 		}
 		this.memoryWing = readMemoryWing(cwd);
 		this.mcpManager = new McpManager(cwd);
+		// Also on a crash or a signal, which skip stop(): the servers are this process's children.
+		process.once("exit", () => this.mcpManager.killAllSync());
 		const mode = options.mode ?? (model ? defaultSamplingMode(model) : "thinking");
 		if (model?.discover) this.connectMode = options.mode;
 		this.agent = new Agent({
@@ -2607,7 +2609,7 @@ class InteractiveApp {
 		if (this.isServing) {
 			void this.stopServe();
 		}
-		void this.mcpManager.stopAll();
+		this.mcpManager.killAllSync();
 		this.knowledgeBase?.stop();
 		this.saveMemory();
 		// Leave the final frame on screen as it is now (for example with the submitted /quit cleared).

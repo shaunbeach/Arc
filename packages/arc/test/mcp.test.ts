@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,6 +59,18 @@ describe("McpManager", () => {
 		const { tools } = await mcp.tools(BUILTIN_TOOL_NAMES);
 		const readOnly = Object.fromEntries(tools.map((tool) => [tool.name, tool.readOnly]));
 		expect(readOnly).toMatchObject({ where: true, change: false, trusted_change: true });
+	}, 30_000);
+
+	it("kills every server at once when quitting", async () => {
+		const { mcp } = manager(fixture("notes"));
+		await mcp.startServer("notes");
+		const running = await mcp.tools(BUILTIN_TOOL_NAMES);
+		expect(running.tools.length).toBeGreaterThan(0);
+		const pids = execFileSync("pgrep", ["-f", FIXTURE]).toString().trim().split("\n");
+		mcp.killAllSync();
+		expect(mcp.getRunningNames()).toEqual([]);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		for (const pid of pids) expect(() => process.kill(Number(pid), 0)).toThrow();
 	}, 30_000);
 
 	it("explains a server that does not start, with its stderr", async () => {

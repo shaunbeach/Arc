@@ -120,6 +120,22 @@ export class McpManager {
 	}
 
 	/**
+	 * Kill every server's process now, without the MCP shutdown handshake. For quitting: `stopAll` is async, and the
+	 * process may exit before it finishes, leaving a server running.
+	 */
+	killAllSync(): void {
+		for (const { transport } of this.servers.values()) {
+			if (transport.pid === null) continue;
+			try {
+				process.kill(transport.pid, "SIGTERM");
+			} catch {
+				// Already gone.
+			}
+		}
+		this.servers.clear();
+	}
+
+	/**
 	 * The tools of every running server. A tool whose name is in `reserved` (the built-in tools) or already taken by
 	 * another server is renamed `<server>_<name>`, so no call goes to the wrong tool. A server that fails to list its
 	 * tools is skipped and named in `failed`.
