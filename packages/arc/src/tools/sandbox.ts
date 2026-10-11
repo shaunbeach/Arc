@@ -89,6 +89,16 @@ export function sandboxPolicy(
 }
 
 /**
+ * The `deep_research` subagent's sandbox: like `on`, but the project is not writable, so bash can search and read
+ * and change nothing. Temp folders and caches stay writable, since tools such as rg and git may write there.
+ */
+export function readOnlySandboxPolicy(cwd: string, home: string = homedir()): SandboxPolicy {
+	const project = realPath(projectRoot(cwd));
+	const roots = [realPath(tmpdir()), "/private/tmp", ...cacheRoots(home)];
+	return { level: "on", project, writableRoots: [...new Set(roots)] };
+}
+
+/**
  * The Seatbelt profile for `policy`. It starts from `allow default` and takes away only what the sandbox is for:
  * writes outside the roots, connections beyond this machine, and the two ways around both. AppleEvents would let a
  * command ask Finder to delete a file, and LaunchServices (`open`) starts apps and browsers outside the sandbox.
@@ -140,6 +150,9 @@ export function sandboxNote(output: string, policy: SandboxPolicy | undefined = 
 		return "[Arc's sandbox blocks opening files in apps. Do not look for another app or run one directly: tell the user the file's path so they can open it.]";
 	}
 	if (WRITE_DENIED.test(output)) {
+		if (!policy.writableRoots.includes(policy.project)) {
+			return "[Arc's sandbox blocked this: this run is read-only and cannot change files. Report what should change instead.]";
+		}
 		return `[Arc's sandbox may have blocked this: commands can write only inside ${policy.project}, temp folders, and caches. Keep your work there; do not retry elsewhere.]`;
 	}
 	return undefined;

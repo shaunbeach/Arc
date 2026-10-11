@@ -27,6 +27,10 @@ export interface AgentOptions {
 	interactionMode?: InteractionMode;
 	/** Whether the model has the web tools. Default: yes. */
 	web?: boolean;
+	/** Whether the model has the headless browser tool. Default: no. */
+	browser?: boolean;
+	/** Whether the subagent tool is enabled. Default: no. */
+	subagent?: boolean;
 	/** Whether the model has kb_search. Default: no. */
 	rag?: boolean;
 	/** The `/ponytail` level. Default: off. */
@@ -54,11 +58,14 @@ export class Agent {
 	mode: SamplingMode;
 	interactionMode: InteractionMode;
 	web: boolean;
+	browser: boolean;
+	subagent: boolean;
 	rag: boolean;
 	ponytail: PonytailLevel;
 	cwd: string;
 	systemPrompt: string;
 	tools: AgentTool[];
+	mcpTools: AgentTool[] = [];
 	private transcript: Message[];
 	private readonly streamFn: StreamFn | undefined;
 	private readonly jevAsker: JevAsker | undefined;
@@ -72,6 +79,8 @@ export class Agent {
 		this.mode = options.mode ?? "thinking";
 		this.interactionMode = options.interactionMode ?? "agent";
 		this.web = options.web ?? true;
+		this.browser = options.browser ?? false;
+		this.subagent = options.subagent ?? false;
 		this.rag = options.rag ?? false;
 		this.ponytail = options.ponytail ?? "off";
 		this.cwd = options.cwd ?? process.cwd();
@@ -207,6 +216,21 @@ export class Agent {
 		this.rebuildSystemPrompt();
 	}
 
+	/** Record `/browser`. The app rebuilds the tools; the tool's own description is all the model needs. */
+	setBrowser(browser: boolean): void {
+		this.browser = browser;
+	}
+
+	/** Record `/subagent`. The app rebuilds the tools; the tool's own description is all the model needs. */
+	setSubagent(subagent: boolean): void {
+		this.subagent = subagent;
+	}
+
+	/** The tools of the running MCP servers. activeTools offers them by mode, as it does the built-in tools. */
+	setMcpTools(mcpTools: AgentTool[]): void {
+		this.mcpTools = mcpTools;
+	}
+
 	/** Give the model kb_search, or take it away (`/rag`). The prompt says which it has. */
 	setRag(rag: boolean): void {
 		this.rag = rag;
@@ -243,12 +267,15 @@ export class Agent {
 	/** The tools available for the current interaction mode, without the web tools while web is off or kb_search while rag is. */
 	get activeTools(): AgentTool[] {
 		const allowed = this.interactionMode === "agent" ? undefined : TOOLS_BY_MODE[this.interactionMode];
-		return this.tools.filter(
+		const builtIn = this.tools.filter(
 			(tool) =>
 				(!allowed || allowed.includes(tool.name)) &&
 				(this.web || !WEB_TOOLS.includes(tool.name)) &&
 				(this.rag || !RAG_TOOLS.includes(tool.name)),
 		);
+		// MCP tools follow the mode too: plan and chat get only the ones that only read.
+		const mcp = this.mcpTools.filter((tool) => this.interactionMode === "agent" || tool.readOnly === true);
+		return [...builtIn, ...mcp];
 	}
 
 	async prompt(input: string | UserMessage): Promise<void> {

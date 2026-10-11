@@ -18,7 +18,7 @@ describe("system prompt", () => {
 			expect(on).toContain("web_search");
 		}
 		expect(buildSystemPrompt({ cwd: "/w", interactionMode: "chat", web: false })).toContain(
-			"no tools and no web access",
+			"no web access in this session",
 		);
 	});
 
@@ -32,11 +32,7 @@ describe("system prompt", () => {
 	it("keeps plan and chat prompts and their tools under 1000 tokens", () => {
 		for (const mode of ["plan", "chat"] as const) {
 			const prompt = buildSystemPrompt({ cwd: "/work/project", platform: "darwin", interactionMode: mode });
-			const modeTools = tools.filter((t) =>
-				mode === "chat"
-					? ["web_search", "web_fetch"].includes(t.name)
-					: ["read", "web_search", "web_fetch"].includes(t.name),
-			);
+			const modeTools = tools.filter((t) => ["read", "web_search", "web_fetch"].includes(t.name));
 			const characters = prompt.length + JSON.stringify(toChatTools(modeTools)).length;
 			expect(characters).toBeLessThan(3000);
 			expect(estimateFixedPromptTokens(prompt, modeTools)).toBeLessThan(1000);

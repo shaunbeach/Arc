@@ -11,6 +11,9 @@ models.yml
 models-*.yml
 models.yml.bak*
 
+# MCP server config can hold API keys and local paths.
+mcp.yml
+
 # Copied from the repository root by the Arc prepack script.
 packages/arc/README.md
 packages/arc/LICENSE

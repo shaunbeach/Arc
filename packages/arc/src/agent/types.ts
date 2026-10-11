@@ -27,6 +27,11 @@ export type ToolUpdateCallback<TDetails = unknown> = (partial: ToolResult<TDetai
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
 	/** Short name for the UI. */
 	label: string;
+	/**
+	 * Only reads, so plan and chat modes may offer it. Built-in tools are listed per mode in TOOLS_BY_MODE instead; this
+	 * is for MCP tools, whose names Arc cannot know ahead.
+	 */
+	readOnly?: boolean;
 	/** Rewrite raw arguments before schema validation, to accept shapes models commonly send. May throw. */
 	prepareArguments?(args: unknown): unknown;
 	/** Throw on failure: the error message becomes the tool result the model sees. */

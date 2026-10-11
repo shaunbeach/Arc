@@ -382,6 +382,11 @@ export class ToolView implements Component {
 		if (this.state === "error") return textLines.slice(0, TOOL_PREVIEW_LINES).map(style.red);
 
 		switch (this.toolCall.name) {
+			case "deep_research": {
+				// While it runs, its latest steps; afterwards, only how long the report is, since the model reads it.
+				if (this.state === "running") return textLines.slice(-TOOL_PREVIEW_LINES).map(style.dim);
+				return textLines.length > 0 ? [style.dim(`Report: ${textLines.length} lines`)] : [];
+			}
 			case "bash": {
 				const shown = textLines.slice(-TOOL_PREVIEW_LINES).map(style.dim);
 				const hidden = textLines.length - shown.length;

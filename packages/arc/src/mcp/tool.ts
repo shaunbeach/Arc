@@ -1,46 +1,47 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
-import { Type } from "typebox";
-import type { AgentTool } from "../agent/types.ts";
+import { type TSchema, Type } from "typebox";
+import type { AgentTool, ToolResult } from "../agent/types.ts";
 
-export function createMcpAgentTool(serverName: string, mcpTool: McpTool, client: Client): AgentTool {
+type McpContent = { type: string; text?: string; data?: string; mimeType?: string };
+
+function textOf(content: readonly McpContent[]): string {
+	return content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("\n");
+}
+
+/**
+ * An MCP server's tool as an Arc tool. `name` is what the model calls it, which differs from the server's name for it
+ * when that collides; calls always go to the server under its own name.
+ */
+export function createMcpAgentTool(
+	serverName: string,
+	mcpTool: McpTool,
+	client: Client,
+	options: { name: string; readOnly: boolean },
+): AgentTool {
 	return {
-		name: mcpTool.name,
+		name: options.name,
 		label: `mcp: ${serverName}`,
 		description: mcpTool.description ?? `MCP tool ${mcpTool.name} from server ${serverName}`,
-		parameters: Type.Unsafe<any>(mcpTool.inputSchema),
-		async execute(_toolCallId, params) {
-			try {
-				const result = await client.callTool({
-					name: mcpTool.name,
-					arguments: params as any,
-				});
-
-				if (result.isError) {
-					const contentArray = result.content as any[];
-					throw new Error(
-						`MCP Tool Error: ${contentArray.map((c) => (c.type === "text" ? c.text : "")).join("\n")}`,
-					);
-				}
-
-				const contentArray = result.content as any[];
-				return {
-					content: contentArray.map((c) => {
-						if (c.type === "text") return { type: "text", text: c.text };
-						if (c.type === "image") {
-							return {
-								type: "image",
-								mimeType: c.mimeType,
-								data: c.data,
-							};
-						}
-						return { type: "text", text: JSON.stringify(c) };
-					}),
-				};
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				throw new Error(`MCP Tool failed: ${msg}`);
-			}
+		readOnly: options.readOnly,
+		// The server's JSON Schema, passed through as is.
+		parameters: Type.Unsafe<Record<string, unknown>>(mcpTool.inputSchema as TSchema),
+		async execute(_toolCallId, params, signal) {
+			const result = await client.callTool(
+				{ name: mcpTool.name, arguments: params as Record<string, unknown> },
+				undefined,
+				{ signal },
+			);
+			const content = (result.content ?? []) as McpContent[];
+			if (result.isError) throw new Error(`MCP tool ${mcpTool.name} failed: ${textOf(content)}`);
+			const parts: ToolResult["content"] = content.map((part) =>
+				part.type === "text"
+					? { type: "text", text: part.text ?? "" }
+					: part.type === "image" && part.data && part.mimeType
+						? { type: "image", data: part.data, mimeType: part.mimeType }
+						: { type: "text", text: JSON.stringify(part) },
+			);
+			return { content: parts };
 		},
 	};
 }

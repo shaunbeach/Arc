@@ -89,24 +89,24 @@ export function isLocalAddress(address: string): boolean {
 
 export type LookupFunction = (hostname: string) => Promise<readonly string[]>;
 
-const lookupAll: LookupFunction = async (hostname) =>
+export const lookupAll: LookupFunction = async (hostname) =>
 	(await dnsLookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address);
+
+/** Whether `hostname` is local: localhost, or an address that is or resolves to one that is not public. */
+export async function isLocalHost(hostname: string, lookup: LookupFunction): Promise<boolean> {
+	const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	if (host === "localhost" || host.endsWith(".localhost")) return true;
+	if (isIP(host)) return isLocalAddress(host);
+	return (await lookup(host)).some(isLocalAddress);
+}
 
 /** Throws when `url` names or resolves to a local address. */
 async function assertPublic(url: URL, lookup: LookupFunction): Promise<void> {
-	const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-	const refuse = () => {
+	if (await isLocalHost(url.hostname, lookup)) {
 		throw new Error(
 			`web_fetch only reaches public addresses in plan and chat modes; ${url.host} is local. Switch to /agent to fetch it.`,
 		);
-	};
-	if (host === "localhost" || host.endsWith(".localhost")) refuse();
-	if (isIP(host)) {
-		if (isLocalAddress(host)) refuse();
-		return;
 	}
-	const addresses = await lookup(host);
-	if (addresses.some(isLocalAddress)) refuse();
 }
 
 /** The charset a page declares, in its header or early in its HTML. */

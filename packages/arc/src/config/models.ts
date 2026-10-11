@@ -74,6 +74,8 @@ export interface ModelsConfig {
 	rag?: RagConfig;
 	/** `/supervise` settings, when models.yml has a `supervisor:` section. */
 	supervisor?: SupervisorConfig;
+	/** The `deep_research` subagent, when models.yml has a `subagent:` section. */
+	subagent?: SubagentConfig;
 	/** The test suites `/test` runs, when models.yml has a `tests:` section. */
 	tests?: TestsConfig;
 	/** Limits on bash and checks, when models.yml has a `sandbox:` section. Without one, the sandbox is off. */
@@ -92,6 +94,15 @@ export interface SupervisorConfig {
 	maxRetries: number;
 	/** Minutes one actor turn may run before the loop guard ends it and the phase is checked. Default: 90. */
 	attemptMinutes: number;
+}
+
+export interface SubagentConfig {
+	/** Name of the models.yml entry the subagent runs on. It runs beside the main model, so it needs its own port. */
+	model: string;
+	/** Model turns before the subagent must write its report. Default: 20. */
+	maxTurns: number;
+	/** Minutes before the subagent must write its report. Default: 5. */
+	timeoutMinutes: number;
 }
 
 export class ModelsConfigError extends Error {
@@ -171,7 +182,7 @@ export function hasFlag(args: readonly string[], flags: readonly string[]): bool
 }
 
 /**
- * Parse models.yml. Only `providers:`, `rag:`, `supervisor:`, `tests:`, and `sandbox:` are read; other top-level
+ * Parse models.yml. Only `providers:`, `rag:`, `supervisor:`, `subagent:`, `tests:`, and `sandbox:` are read; other top-level
  * keys (such as another tool's `ask:` block) are ignored. Errors name the file and the offending key.
  */
 export function parseModelsConfig(text: string, path: string, options: ParseModelsOptions = {}): ModelsConfig {
@@ -440,6 +451,20 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 			attemptMinutes: readPositiveInt(root.supervisor, "attemptMinutes", "supervisor") ?? 90,
 		};
 	}
+	// `subagent:` names the model `deep_research` runs on, beside the main model.
+	let subagent: SubagentConfig | undefined;
+	if (root.subagent !== undefined) {
+		if (!isRecord(root.subagent)) throw configError("subagent", "must be a mapping");
+		const name = readString(root.subagent, "model", "subagent");
+		if (!name) throw configError("subagent.model", "is required");
+		const model = findModel(models, name);
+		if (!model) throw configError("subagent.model", `names no model: ${name}`);
+		subagent = {
+			model: model.name,
+			maxTurns: readPositiveInt(root.subagent, "maxTurns", "subagent") ?? 20,
+			timeoutMinutes: readPositiveInt(root.subagent, "timeoutMinutes", "subagent") ?? 5,
+		};
+	}
 	// `tests:` names the folder of test suites `/test` runs.
 	let tests: TestsConfig | undefined;
 	if (root.tests !== undefined) {
@@ -470,6 +495,7 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 		warnings,
 		...(rag ? { rag } : {}),
 		...(supervisor ? { supervisor } : {}),
+		...(subagent ? { subagent } : {}),
 		...(tests ? { tests } : {}),
 		...(sandbox ? { sandbox } : {}),
 	};

@@ -9,6 +9,7 @@ export type CommandName =
 	| "plan"
 	| "chat"
 	| "web"
+	| "browser"
 	| "sandbox"
 	| "rag"
 	| "mempalace"
@@ -26,13 +27,25 @@ export type CommandName =
 	| "usage"
 	| "test"
 	| "cd"
+	| "export"
+	| "raw"
+	| "recap"
+	| "mcp"
+	| "subagent"
 	| "quit";
 
 export const COMMANDS: readonly { name: CommandName; description: string; argumentHint?: string }[] = [
 	{ name: "agent", description: "Switch to agent mode (autonomous coding with all tools)" },
 	{ name: "plan", description: "Switch to plan mode (design & planning, read-only tools)" },
-	{ name: "chat", description: "Switch to chat mode (conversation & web search, no file tools)" },
+	{ name: "chat", description: "Switch to chat mode (conversation, read-only files, web search)" },
 	{ name: "web", description: "Turn the model's web tools on or off", argumentHint: "[on|off]" },
+	{ name: "browser", description: "Turn the model's headless browser on or off", argumentHint: "[on|off]" },
+	{
+		name: "mcp",
+		description: "Manage MCP servers: list, toggle one, start all, or stop all",
+		argumentHint: "[server|all|off]",
+	},
+	{ name: "subagent", description: "Turn the subagent research tool on or off", argumentHint: "[on|off]" },
 	{
 		name: "sandbox",
 		description: "Limit what bash may write and reach: on, net (internet allowed), or off",
@@ -78,6 +91,9 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 		argumentHint: "[eval|workbench|all] [quick] | stop",
 	},
 	{ name: "cd", description: "Change working directory", argumentHint: "<path>" },
+	{ name: "export", description: "Export the conversation as a markdown file", argumentHint: "[path]" },
+	{ name: "raw", description: "Print the raw scrollback for easy terminal copying" },
+	{ name: "recap", description: "Ask the model to summarize the current conversation" },
 	{ name: "quit", description: "Exit" },
 ];
 
@@ -117,7 +133,7 @@ export function resolveMode(current: SamplingMode, arg: string): SamplingMode | 
 }
 
 /** Commands for the editor's autocomplete, with completions for model names and modes. */
-export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
+export function slashCommands(models: readonly LiteModel[], mcpServerNames: readonly string[] = []): SlashCommand[] {
 	// Prefer values that start with what was typed; fall back to substrings, so "27" still finds "Qwen3.8-27B".
 	const complete = (values: readonly string[]) => (prefix: string) => {
 		const lower = prefix.toLowerCase();
@@ -130,6 +146,9 @@ export function slashCommands(models: readonly LiteModel[]): SlashCommand[] {
 		serve: complete(models.map((model) => model.name)),
 		mode: complete(SAMPLING_MODES),
 		web: complete(["on", "off"]),
+		browser: complete(["on", "off"]),
+		subagent: complete(["on", "off"]),
+		mcp: complete([...mcpServerNames, "all", "off"]),
 		rag: complete(["on", "off"]),
 		sandbox: complete(SANDBOX_LEVELS),
 		ponytail: complete(PONYTAIL_LEVELS),

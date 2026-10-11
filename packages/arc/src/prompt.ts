@@ -13,7 +13,7 @@ export function isInteractionMode(value: string): value is InteractionMode {
 /** Tools each restricted mode exposes. Agent mode exposes all registered tools. */
 export const TOOLS_BY_MODE: Record<"plan" | "chat", readonly string[]> = {
 	plan: ["read", "web_search", "web_fetch", "kb_search", "memory"],
-	chat: ["web_search", "web_fetch", "kb_search", "memory"],
+	chat: ["read", "web_search", "web_fetch", "kb_search", "memory"],
 };
 
 /** The tools `/web off` takes away in every mode. */
@@ -80,35 +80,43 @@ OS: ${platform}
 Working directory: ${cwd}`;
 }
 
+/**
+ * The `deep_research` subagent's prompt. It works for another model, not the user, so its whole job is a report that
+ * model can act on without redoing the search.
+ */
+export function buildResearchPrompt(cwd: string, platform: string, bash: boolean): string {
+	const search = bash
+		? "- Search with rg, grep, find, and ls through bash; read only the parts of files that matter."
+		: "- Read files with read; read only the parts that matter.";
+	return `You are a research subagent. Another coding assistant gave you a task; investigate this project and report back.
+
+Rules:
+${search}
+- You cannot change files or reach the internet. Do not try.
+- Finish with a concise report: what you found, with file paths and line numbers, and anything you could not settle.
+- Your report is all the other assistant sees, so put every finding it needs in it.
+
+OS: ${platform}
+Working directory: ${cwd}`;
+}
+
 function buildChatPrompt(cwd: string, platform: string, web: boolean, rag: boolean): string {
-	if (!web && rag) {
-		return `You are a helpful, knowledgeable, and concise AI conversational assistant running in the user's terminal.
-Answer the user's questions clearly and directly. Provide explanations or code blocks in your responses when asked.
-
-You have no web access, but kb_search searches an offline knowledge base (Wikipedia, programming docs). Use it when you are unsure of a fact, and name the article you used. If the user asks you to inspect or change the project, tell them to switch with /agent, or /plan to draw up an approach first.
-
-OS: ${platform}
-Working directory: ${cwd}`;
-	}
-	if (!web) {
-		return `You are a helpful, knowledgeable, and concise AI conversational assistant running in the user's terminal.
-Answer the user's questions clearly and directly. Provide explanations or code blocks in your responses when asked.
-
-You have no tools and no web access in this session. Answer from your own knowledge, and say when something may be out of date. If the user asks you to inspect or change the project, tell them to switch with /agent, or /plan to draw up an approach first.
-
-OS: ${platform}
-Working directory: ${cwd}`;
-	}
-	return `You are a helpful, knowledgeable, and concise AI conversational assistant running in the user's terminal.
-Answer the user's questions clearly and directly. Provide explanations or code blocks in your responses when asked.
-
-You can reach the internet:
+	const webSection = web
+		? `\n\nYou can reach the internet:
 - web_search finds pages for a query. Use it when the answer depends on current information or documentation.
 - web_fetch reads one page as text. Use it to read a result you found, or a URL the user gives you.
 - Answer from your own knowledge when it is sufficient; do not search for settled facts.
-- Cite the URL when you use something you read.${kbLine(web, rag)}
+- Cite the URL when you use something you read.${kbLine(web, rag)}`
+		: rag
+			? "\n\nYou have no web access, but kb_search searches an offline knowledge base (Wikipedia, programming docs). Use it when you are unsure of a fact, and name the article you used."
+			: "\n\nYou have no web access in this session. Answer from your own knowledge, and say when something may be out of date.";
 
-You have no file or shell tools in this mode. If the user asks you to inspect or change the project, tell them to switch with /agent, or /plan to draw up an approach first.
+	return `You are a helpful, knowledgeable, and concise AI conversational assistant running in the user's terminal.
+Answer the user's questions clearly and directly. Provide explanations or code blocks in your responses when asked.${webSection}
+
+Rules:
+- Use read to inspect project files and documents when asked. You cannot edit files or run shell commands.
+- If the user asks you to modify the project or run commands, tell them to switch with /agent, or /plan to draw up an approach first.
 
 OS: ${platform}
 Working directory: ${cwd}`;

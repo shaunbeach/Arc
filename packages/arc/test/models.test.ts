@@ -262,6 +262,29 @@ describe("supervisor", () => {
 	});
 });
 
+describe("subagent", () => {
+	const withSubagent = (block: string) => `${CONFIG}\n${block}`;
+
+	it("resolves the model to its name and defaults the limits", () => {
+		expect(parse(withSubagent("subagent:\n  model: qwen3.5")).subagent).toEqual({
+			model: "Qwen3.5-4B-Q6_K",
+			maxTurns: 20,
+			timeoutMinutes: 5,
+		});
+		expect(parse(withSubagent("subagent:\n  model: qwen3.5\n  maxTurns: 8\n  timeoutMinutes: 2")).subagent).toEqual({
+			model: "Qwen3.5-4B-Q6_K",
+			maxTurns: 8,
+			timeoutMinutes: 2,
+		});
+		expect(parse(CONFIG).subagent).toBeUndefined();
+	});
+
+	it("needs a model that exists", () => {
+		expect(() => parse(withSubagent("subagent:\n  maxTurns: 2"))).toThrow(/subagent.model is required/);
+		expect(() => parse(withSubagent("subagent:\n  model: nobody"))).toThrow(/names no model: nobody/);
+	});
+});
+
 describe("tests", () => {
 	it("resolves the suites folder against models.yml's folder, and warns when it is missing", () => {
 		const config = parse(`${CONFIG}\ntests:\n  folder: suites`);

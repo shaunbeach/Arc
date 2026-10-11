@@ -4,9 +4,17 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { Agent } from "./agent/agent.ts";
+import { runResearch } from "./agent/research.ts";
 import type { AgentEvent, StreamFn } from "./agent/types.ts";
 import { readLastUsed, writeLastUsed } from "./config/last-used.ts";
-import { findModel, findModelsFile, type LiteModel, loadModelsConfig, modelLabel } from "./config/models.ts";
+import {
+	findModel,
+	findModelsFile,
+	type LiteModel,
+	loadModelsConfig,
+	modelLabel,
+	type SubagentConfig,
+} from "./config/models.ts";
 import { getAppDir, migrateLegacyAppDir } from "./config/paths.ts";
 import { defaultSamplingMode, isSamplingMode, type SamplingMode } from "./config/sampling.ts";
 import { STARTER_MODELS_YML } from "./config/starter.ts";
@@ -16,7 +24,7 @@ import { buildRequestBody, streamChat, toChatTools } from "./llm/llama-client.ts
 import { LlamaServerManager, serverOrigin, stopServerOnExit } from "./llm/server.ts";
 import { parseSwapLimit } from "./llm/swap-monitor.ts";
 import type { AssistantMessage } from "./llm/types.ts";
-import { buildSystemPrompt, estimateFixedPromptTokens } from "./prompt.ts";
+import { buildResearchPrompt, buildSystemPrompt, estimateFixedPromptTokens } from "./prompt.ts";
 import {
 	type LoadedSession,
 	listSessions,
@@ -26,7 +34,7 @@ import {
 	SessionFile,
 } from "./session.ts";
 import { createToolsForModel, killRunningCommands } from "./tools/index.ts";
-import { sandboxAvailable, sandboxPolicy, setSandbox } from "./tools/sandbox.ts";
+import { readOnlySandboxPolicy, sandboxAvailable, sandboxPolicy, setSandbox } from "./tools/sandbox.ts";
 import { runInteractive } from "./tui/app.ts";
 import { formatDuration } from "./tui/components.ts";
 
@@ -203,6 +211,52 @@ async function runPrint(options: PrintOptions): Promise<number> {
 	return 0;
 }
 
+/**
+ * `--research`: the `deep_research` subagent, run by the parent Arc as a child process. Bash runs under a read-only
+ * sandbox, and without a sandbox there is no bash, so the subagent can look but not change anything. Progress goes
+ * to stderr for the parent to show; stdout carries only the final report.
+ */
+async function runResearchMode(options: {
+	model: LiteModel;
+	task: string;
+	cwd: string;
+	manager: LlamaServerManager;
+	limits: SubagentConfig;
+}): Promise<number> {
+	const { cwd, task, manager, limits } = options;
+	const status = (message: string) => process.stderr.write(`${message}\n`);
+	const model = await connectModel(options.model, status);
+	await manager.ensure(model, { onStatus: status });
+
+	const bash = sandboxAvailable();
+	setSandbox(bash ? readOnlySandboxPolicy(cwd) : undefined);
+	const allowed = bash ? ["read", "bash"] : ["read"];
+	const agent = new Agent({
+		model,
+		mode: defaultSamplingMode(model),
+		systemPrompt: buildResearchPrompt(cwd, process.platform, bash),
+		tools: createToolsForModel(model, cwd).filter((tool) => allowed.includes(tool.name)),
+	});
+	agent.subscribe((event) => {
+		if (event.type !== "tool_execution_start") return;
+		const { name, arguments: args } = event.toolCall;
+		const subject = typeof args.command === "string" ? args.command : typeof args.path === "string" ? args.path : "";
+		status(`→ ${name} ${subject}`);
+	});
+
+	const result = await runResearch(agent, task, {
+		maxTurns: limits.maxTurns,
+		timeoutMs: limits.timeoutMinutes * 60_000,
+	});
+	if (result.stoppedBy) status(`Stopped at the ${result.stoppedBy === "turns" ? "turn" : "time"} limit.`);
+	if (result.error && !result.answer) {
+		status(`error: ${result.error}`);
+		return 1;
+	}
+	process.stdout.write(`${result.answer}\n`);
+	return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
 	const normalizedArgv = argv.flatMap((arg, i) => {
 		if (arg === "--serve") {
@@ -231,6 +285,8 @@ async function main(argv: string[]): Promise<number> {
 			"list-models": { type: "boolean" },
 			"show-prompt": { type: "boolean" },
 			verbose: { type: "boolean" },
+			// Internal: how the deep_research tool runs its subagent. Not in --help.
+			research: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 	});
@@ -315,6 +371,11 @@ async function main(argv: string[]): Promise<number> {
 	process.once("exit", killRunningCommands);
 	const saveSessions = values["no-session"] !== true;
 	try {
+		if (prompt && values.research) {
+			if (!explicitModel) return fail("--research needs --model.");
+			const limits = config.subagent ?? { model: explicitModel.name, maxTurns: 20, timeoutMinutes: 5 };
+			return await runResearchMode({ model: explicitModel, task: prompt, cwd, manager, limits });
+		}
 		if (prompt) {
 			if (!printModel) return fail("No model available.");
 			return await runPrint({

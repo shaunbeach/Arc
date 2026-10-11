@@ -41,6 +41,10 @@ export interface SessionSettings {
 	web?: boolean;
 	/** True after `/rag on`. Missing means kb_search is off. */
 	rag?: boolean;
+	/** True after `/browser on`. Missing means browser_capture is off. */
+	browser?: boolean;
+	/** True after `/subagent on`. Missing means deep_research is off. */
+	subagent?: boolean;
 	/** Set by `/ponytail`. Missing means off. */
 	ponytail?: Exclude<PonytailLevel, "off">;
 }
@@ -53,6 +57,8 @@ function sameSettings(a: SessionSettings | undefined, b: SessionSettings): boole
 		(a.interactionMode ?? "agent") === (b.interactionMode ?? "agent") &&
 		(a.web ?? true) === (b.web ?? true) &&
 		(a.rag ?? false) === (b.rag ?? false) &&
+		(a.browser ?? false) === (b.browser ?? false) &&
+		(a.subagent ?? false) === (b.subagent ?? false) &&
 		(a.ponytail ?? "off") === (b.ponytail ?? "off")
 	);
 }

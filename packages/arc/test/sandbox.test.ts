@@ -9,6 +9,7 @@ import { createBashTool } from "../src/tools/bash.ts";
 import { runShellCommand } from "../src/tools/child-process.ts";
 import {
 	projectRoot,
+	readOnlySandboxPolicy,
 	type SandboxPolicy,
 	sandboxAvailable,
 	sandboxNote,
@@ -121,6 +122,22 @@ describe.skipIf(!sandboxAvailable())("sandboxed commands", () => {
 			expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("keep");
 		} finally {
 			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("read but not write the project under the subagent's read-only policy", async () => {
+		// Temp folders stay writable, so the project lives in the home folder.
+		const project = mkdtempSync(join(homedir(), ".arc-sb-readonly-"));
+		try {
+			writeFileSync(join(project, "notes.txt"), "keep");
+			setSandbox(readOnlySandboxPolicy(project));
+			expect((await run("cat notes.txt", project)).output).toBe("keep");
+			const blocked = await run("echo x >> notes.txt; rm notes.txt; touch new.txt", project);
+			expect(blocked.exitCode).not.toBe(0);
+			expect(readFileSync(join(project, "notes.txt"), "utf8")).toBe("keep");
+			expect(sandboxNote(blocked.output)).toMatch(/read-only/);
+		} finally {
+			rmSync(project, { recursive: true, force: true });
 		}
 	});
 

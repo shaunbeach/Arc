@@ -1,3 +1,4 @@
+import type { LiteModel } from "../config/models.ts";
 import type { KnowledgeBase } from "../rag/kiwix.ts";
 
 export interface ToolLimits {
@@ -7,12 +8,25 @@ export interface ToolLimits {
 	maxBytes: number;
 }
 
+export interface SubagentToolOptions {
+	/** The models.yml entry the subagent runs on. */
+	model: LiteModel;
+	/** The models.yml the subagent reads, so it sees the same models as this session. */
+	configPath: string;
+	/** The subagent's own time limit; the parent stops it a little after. */
+	timeoutMinutes: number;
+}
+
 export interface CodingToolOptions {
 	/** Directory that relative paths and commands resolve against. */
 	cwd: string;
 	limits: ToolLimits;
 	/** Whether the model accepts images (models.yml `input`). The read tool attaches image files only then. */
 	acceptsImages: boolean;
+	/** Whether the headless browser tool is enabled. */
+	browser?: boolean;
+	/** The deep_research subagent (`/subagent on` with a models.yml `subagent:`). Without it, there is no deep_research. */
+	subagent?: SubagentToolOptions;
 	/**
 	 * Whether web_fetch may reach loopback and private addresses right now. Default: yes. The app allows it only in
 	 * agent mode, where bash reaches them anyway.

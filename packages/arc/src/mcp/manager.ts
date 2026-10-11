@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { parse as parseYaml } from "yaml";
@@ -11,89 +12,142 @@ export interface McpServerConfig {
 	command: string;
 	args?: string[];
 	env?: Record<string, string>;
+	/**
+	 * Every tool of this server only reads, so plan and chat modes may use them too. Without it, only tools the server
+	 * itself marks read-only (`readOnlyHint`) leave agent mode.
+	 */
+	readOnly?: boolean;
 }
 
 export interface McpConfig {
 	servers?: Record<string, McpServerConfig>;
 }
 
+/** Lines of a server's stderr kept to explain a failed start. */
+const STDERR_LINES = 20;
+
+interface RunningServer {
+	client: Client;
+	transport: StdioClientTransport;
+	config: McpServerConfig;
+	stderr: string[];
+}
+
+/**
+ * The MCP servers in mcp.yml: `./mcp.yml` in the working directory, else `~/.arc/mcp.yml`. Servers run in the working
+ * directory, and their stderr is captured rather than written over the TUI.
+ */
 export class McpManager {
-	private clients = new Map<string, { client: Client; transport: StdioClientTransport }>();
-	private cwd: string;
+	private readonly servers = new Map<string, RunningServer>();
+	readonly cwd: string;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
 	}
 
-	public async startAll(): Promise<AgentTool[]> {
-		const configPathLocal = join(this.cwd, "mcp.yml");
-		const configPathGlobal = join(getAppDir(), "mcp.yml");
-
-		let targetPath: string | undefined;
-		if (existsSync(configPathLocal)) targetPath = configPathLocal;
-		else if (existsSync(configPathGlobal)) targetPath = configPathGlobal;
-
-		if (!targetPath) return [];
-
-		let config: McpConfig;
+	/** The mcp.yml in effect, and its servers. Throws when the file does not parse. */
+	private loadConfig(): { path: string; servers: Record<string, McpServerConfig> } | undefined {
+		const local = join(this.cwd, "mcp.yml");
+		const path = existsSync(local) ? local : join(getAppDir(), "mcp.yml");
+		if (!existsSync(path)) return undefined;
+		let config: McpConfig | undefined;
 		try {
-			const content = readFileSync(targetPath, "utf-8");
-			config = parseYaml(content) as McpConfig;
+			config = parseYaml(readFileSync(path, "utf-8")) as McpConfig | undefined;
 		} catch (error) {
-			console.error(`Failed to parse MCP config at ${targetPath}:`, error);
-			return [];
+			throw new Error(`${path} does not parse: ${error instanceof Error ? error.message : String(error)}`);
 		}
-
-		if (!config || !config.servers) return [];
-
-		const agentTools: AgentTool[] = [];
-
-		for (const [serverName, serverConfig] of Object.entries(config.servers)) {
-			if (this.clients.has(serverName)) {
-				// Already started; retrieve existing tools
-				try {
-					const { client } = this.clients.get(serverName)!;
-					const listResult = await client.listTools();
-					for (const tool of listResult.tools) {
-						agentTools.push(createMcpAgentTool(serverName, tool, client));
-					}
-				} catch {}
-				continue;
-			}
-
-			try {
-				const transport = new StdioClientTransport({
-					command: serverConfig.command,
-					args: serverConfig.args,
-					env: { ...process.env, ...serverConfig.env } as Record<string, string>,
-				});
-
-				const client = new Client({ name: "arc", version: "1.0.0" }, { capabilities: {} });
-
-				await client.connect(transport);
-				this.clients.set(serverName, { client, transport });
-
-				const listResult = await client.listTools();
-				for (const tool of listResult.tools) {
-					agentTools.push(createMcpAgentTool(serverName, tool, client));
-				}
-			} catch (error) {
-				console.error(`Failed to start MCP server ${serverName}:`, error);
-			}
-		}
-
-		return agentTools;
+		return config?.servers ? { path, servers: config.servers } : undefined;
 	}
 
-	public async stopAll(): Promise<void> {
-		for (const [_serverName, { client, transport }] of this.clients.entries()) {
+	/** Every server defined in mcp.yml, or none when it is missing or broken. */
+	getServerNames(): string[] {
+		try {
+			return Object.keys(this.loadConfig()?.servers ?? {});
+		} catch {
+			return [];
+		}
+	}
+
+	getRunningNames(): string[] {
+		return [...this.servers.keys()];
+	}
+
+	/** Start one server. Throws with the reason, including the end of its stderr, when it does not start. */
+	async startServer(name: string): Promise<void> {
+		if (this.servers.has(name)) return;
+		const config = this.loadConfig()?.servers[name];
+		if (!config) throw new Error(`mcp.yml defines no server "${name}".`);
+
+		const transport = new StdioClientTransport({
+			command: config.command,
+			args: config.args,
+			env: { ...process.env, ...config.env } as Record<string, string>,
+			cwd: this.cwd,
+			stderr: "pipe",
+		});
+		const stderr: string[] = [];
+		(transport.stderr as Readable | null)?.on("data", (data: Buffer) => {
+			stderr.push(
+				...data
+					.toString("utf8")
+					.split("\n")
+					.filter((line) => line.trim()),
+			);
+			stderr.splice(0, Math.max(0, stderr.length - STDERR_LINES));
+		});
+		const client = new Client({ name: "arc", version: "1.0.0" }, { capabilities: {} });
+		try {
+			await client.connect(transport);
+		} catch (error) {
+			await transport.close().catch(() => {});
+			const reason = error instanceof Error ? error.message : String(error);
+			const tail = stderr.slice(-5).join("\n");
+			throw new Error(`MCP server ${name} did not start: ${reason}${tail ? `\n${tail}` : ""}`);
+		}
+		this.servers.set(name, { client, transport, config, stderr });
+	}
+
+	async stopServer(name: string): Promise<void> {
+		const server = this.servers.get(name);
+		if (!server) return;
+		this.servers.delete(name);
+		await server.client.close().catch(() => {});
+		await server.transport.close().catch(() => {});
+	}
+
+	async stopAll(): Promise<void> {
+		await Promise.all(this.getRunningNames().map((name) => this.stopServer(name)));
+	}
+
+	/**
+	 * The tools of every running server. A tool whose name is in `reserved` (the built-in tools) or already taken by
+	 * another server is renamed `<server>_<name>`, so no call goes to the wrong tool. A server that fails to list its
+	 * tools is skipped and named in `failed`.
+	 */
+	async tools(reserved: ReadonlySet<string>): Promise<{ tools: AgentTool[]; renamed: string[]; failed: string[] }> {
+		const tools: AgentTool[] = [];
+		const renamed: string[] = [];
+		const failed: string[] = [];
+		const taken = new Set(reserved);
+		for (const [name, server] of this.servers) {
+			let listed: Awaited<ReturnType<Client["listTools"]>>["tools"];
 			try {
-				await client.close();
-				await transport.close();
-			} catch (_error) {
-				// Ignore close errors
+				listed = (await server.client.listTools()).tools;
+			} catch {
+				failed.push(name);
+				continue;
+			}
+			for (const mcpTool of listed) {
+				const readOnly = server.config.readOnly === true || mcpTool.annotations?.readOnlyHint === true;
+				let toolName = mcpTool.name;
+				if (taken.has(toolName)) {
+					toolName = `${name}_${mcpTool.name}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+					renamed.push(`${mcpTool.name} → ${toolName}`);
+				}
+				taken.add(toolName);
+				tools.push(createMcpAgentTool(name, mcpTool, server.client, { name: toolName, readOnly }));
 			}
 		}
-		this.clients.clear();
+		return { tools, renamed, failed };
 	}
 }

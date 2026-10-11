@@ -2,7 +2,13 @@
 	"name": "arc",
 	"version": "0.0.1",
 	"description": "Lean terminal coding harness for local llama.cpp models",
-	"keywords": ["llama.cpp", "llama-server", "local-llm", "coding-agent", "terminal"],
+	"keywords": [
+		"llama.cpp",
+		"llama-server",
+		"local-llm",
+		"coding-agent",
+		"terminal"
+	],
 	"author": "Shaun Beach",
 	"homepage": "https://github.com/shaunbeach/Arc#readme",
 	"repository": {
@@ -17,7 +23,9 @@
 	"bin": {
 		"arc": "dist/arc.js"
 	},
-	"files": ["dist/arc.js"],
+	"files": [
+		"dist/arc.js"
+	],
 	"scripts": {
 		"build": "node scripts/build.mjs",
 		"dev": "node src/cli.ts",
@@ -26,6 +34,7 @@
 	},
 	"devDependencies": {
 		"@earendil-works/pi-tui": "^0.85.1",
+		"@modelcontextprotocol/sdk": "1.32.1",
 		"diff": "8.0.4",
 		"esbuild": "0.28.2",
 		"partial-json": "0.1.7",

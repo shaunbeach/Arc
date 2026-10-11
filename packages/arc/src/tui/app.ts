@@ -21,7 +21,7 @@ import { Agent } from "../agent/agent.ts";
 import type { AgentEvent } from "../agent/types.ts";
 import { writeLastUsed } from "../config/last-used.ts";
 import { findModel, type LiteModel, type ModelsConfig, modelLabel } from "../config/models.ts";
-import { getAppDir } from "../config/paths.ts";
+import { expandHome, getAppDir } from "../config/paths.ts";
 import { defaultSamplingMode, type SamplingMode } from "../config/sampling.ts";
 import { describeTrim } from "../context.ts";
 import { fetchServerProps, listedProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
@@ -79,7 +79,13 @@ import {
 } from "../supervisor/supervisor.ts";
 import { openReport, parseTestArgs, progressIn, runSuite, type SuiteCommand, suiteCommand } from "../test-suite.ts";
 import { killLeftoverProcesses, runShellCommand, setLeftoverLimit } from "../tools/child-process.ts";
-import { type CodingToolOptions, createToolsForModel } from "../tools/index.ts";
+import {
+	BUILTIN_TOOL_NAMES,
+	type CodingToolOptions,
+	createToolsForModel,
+	subagentSharesServer,
+} from "../tools/index.ts";
+import type { SubagentToolOptions } from "../tools/options.ts";
 import {
 	currentSandbox,
 	isSandboxLevel,
@@ -259,6 +265,8 @@ class InteractiveApp {
 			interactionMode: options.session?.settings?.interactionMode,
 			web: options.session?.settings?.web,
 			rag: rag !== undefined && options.session?.settings?.rag === true,
+			browser: options.session?.settings?.browser === true,
+			subagent: options.session?.settings?.subagent === true,
 			ponytail: options.session?.settings?.ponytail,
 			tools: model ? createToolsForModel(model, cwd, this.toolOptions()) : [],
 			messages: options.session?.messages,
@@ -277,7 +285,9 @@ class InteractiveApp {
 		this.agent.subscribe((event) => this.onAgentEvent(event));
 
 		this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 });
-		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands(options.config.models), cwd));
+		this.editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(slashCommands(options.config.models, this.mcpManager.getServerNames()), cwd),
+		);
 		this.editor.onSubmit = (text) => this.submit(text);
 		this.editor.onSubmitForce = (text) => this.submitForce(text);
 		this.editorSlot.addChild(this.editor);
@@ -752,7 +762,7 @@ class InteractiveApp {
 	private runCommand(name: CommandName, args: string): void {
 		switch (name) {
 			case "cd":
-				this.changeDirectory(args);
+				void this.changeDirectory(args);
 				return;
 			case "agent":
 			case "plan":
@@ -764,6 +774,9 @@ class InteractiveApp {
 				return;
 			case "browser":
 				this.switchBrowser(args);
+				return;
+			case "subagent":
+				this.switchSubagent(args);
 				return;
 			case "mcp":
 				void this.switchMcp(args);
@@ -838,13 +851,25 @@ class InteractiveApp {
 	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
 	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
 	 */
-	private toolOptions(): Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory" | "browser"> {
+	private toolOptions(): Pick<
+		CodingToolOptions,
+		"allowLocalNetwork" | "knowledgeBase" | "memory" | "browser" | "subagent"
+	> {
 		return {
 			allowLocalNetwork: () => this.agent.interactionMode === "agent",
 			knowledgeBase: this.knowledgeBase,
 			memory: this.memoryWing || palaceExists() ? { wing: this.memoryWing } : undefined,
 			browser: this.agent.browser,
+			subagent: this.subagentOptions(),
 		};
+	}
+
+	/** The deep_research subagent, while `/subagent` is on and models.yml names its model. */
+	private subagentOptions(): SubagentToolOptions | undefined {
+		const config = this.options.config;
+		const model = config.subagent && findModel(config.models, config.subagent.model);
+		if (!this.agent.subagent || !config.subagent || !model) return undefined;
+		return { model, configPath: config.path, timeoutMinutes: config.subagent.timeoutMinutes };
 	}
 
 	/**
@@ -889,6 +914,8 @@ class InteractiveApp {
 			interactionMode: this.agent.interactionMode,
 			...(this.agent.web ? {} : { web: false }),
 			...(this.agent.rag ? { rag: true } : {}),
+			...(this.agent.browser ? { browser: true } : {}),
+			...(this.agent.subagent ? { subagent: true } : {}),
 			...(this.agent.ponytail === "off" ? {} : { ponytail: this.agent.ponytail }),
 		};
 	}
@@ -898,7 +925,9 @@ class InteractiveApp {
 		const inMode = mode === "agent" ? "" : ` in ${mode} mode`;
 		const named = this.sessionName ? ` "${this.sessionName}"` : "";
 		const ponytail = this.agent.ponytail === "off" ? "" : `, ponytail ${this.agent.ponytail}`;
-		const tools = `${this.agent.web ? "" : ", web off"}${this.agent.rag ? ", rag on" : ""}${ponytail}`;
+		const browser = this.agent.browser ? ", browser on" : "";
+		const subagent = this.agent.subagent ? ", subagent on" : "";
+		const tools = `${this.agent.web ? "" : ", web off"}${this.agent.rag ? ", rag on" : ""}${browser}${subagent}${ponytail}`;
 		return `Resumed session ${id.slice(0, 8)}${named}${inMode}${tools}.`;
 	}
 
@@ -941,33 +970,117 @@ class InteractiveApp {
 		}
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		this.notice(style.gray(browser ? `Browser tools on${note}.` : `Browser tools off${note}.`));
+		const model = this.agent.model;
+		if (browser && model && !model.input.includes("image")) {
+			this.notice(
+				style.yellow(`${model.name} does not accept images, so it gets browser_capture only on a model that does.`),
+			);
+		}
 		this.updateFooter();
 	}
 
-	private async switchMcp(arg: string): Promise<void> {
+	private switchSubagent(arg: string): void {
 		const choice = arg.trim().toLowerCase();
 		if (choice && choice !== "on" && choice !== "off") {
-			this.notice(style.yellow("Use /mcp on, /mcp off, or /mcp to switch."));
+			this.notice(style.yellow("Use /subagent on, /subagent off, or /subagent to switch."));
 			return;
 		}
-		const mcp = choice ? choice === "on" : !this.agent.mcp;
-		if (mcp === this.agent.mcp) {
-			this.notice(style.gray(`MCP tools are already ${mcp ? "on" : "off"}.`));
+		const subagent = choice ? choice === "on" : !this.agent.subagent;
+		if (subagent === this.agent.subagent) {
+			this.notice(style.gray(`Subagent is already ${subagent ? "on" : "off"}.`));
+			return;
+		}
+		const configured = this.options.config.subagent;
+		if (subagent && !configured) {
+			this.notice(style.yellow("No subagent model: add `subagent:` with `model: <name>` to models.yml."));
+			return;
+		}
+		this.agent.setSubagent(subagent);
+		if (this.agent.model) {
+			this.agent.tools = createToolsForModel(this.agent.model, this.options.cwd, this.toolOptions());
+			this.session?.updateSettings(this.sessionSettings(this.agent.model));
+		}
+		const note = this.agent.isRunning ? " (from the next message)" : "";
+		this.notice(style.gray(subagent ? `Subagent tool on${note}.` : `Subagent tool off${note}.`));
+		const main = this.agent.model;
+		const helper = this.subagentOptions()?.model;
+		if (subagent && main && helper && subagentSharesServer(main, helper)) {
+			this.notice(
+				style.yellow(
+					`${helper.name} uses the same server as ${main.name}, so deep_research is offered only with a main model on another port.`,
+				),
+			);
+		}
+		this.updateFooter();
+	}
+
+	/** `/mcp` lists the servers in mcp.yml; `/mcp <server>` starts or stops one; `/mcp all` and `/mcp off` all of them. */
+	private async switchMcp(arg: string): Promise<void> {
+		const choice = arg.trim();
+		const allNames = this.mcpManager.getServerNames();
+		if (allNames.length === 0) {
+			this.notice(style.yellow("No MCP servers: add them under `servers:` in ./mcp.yml or ~/.arc/mcp.yml."));
 			return;
 		}
 
-		if (mcp) {
-			this.notice(style.gray("Starting MCP servers..."));
-			this.tui.requestRender();
-			const tools = await this.mcpManager.startAll();
-			this.agent.setMcp(true, tools);
-			this.notice(style.gray(`MCP tools on. Loaded ${tools.length} tool(s).`));
-		} else {
-			this.agent.setMcp(false);
+		if (!choice) {
+			const running = new Set(this.mcpManager.getRunningNames());
+			const lines = allNames.map((name) => `  ${name}${running.has(name) ? style.green(" (running)") : ""}`);
+			this.notice(style.gray(`MCP servers:\n${lines.join("\n")}`));
+			return;
+		}
+
+		if (choice.toLowerCase() === "off") {
 			await this.mcpManager.stopAll();
-			this.notice(style.gray("MCP tools off."));
+			await this.refreshMcpTools();
+			this.notice(style.gray("All MCP servers stopped."));
+			return;
+		}
+
+		const all = choice.toLowerCase() === "all";
+		const name = all ? undefined : allNames.find((candidate) => candidate.toLowerCase() === choice.toLowerCase());
+		if (!all && !name) {
+			this.notice(style.yellow(`Unknown server "${choice}". Use /mcp to see the servers in mcp.yml.`));
+			return;
+		}
+		if (name && this.mcpManager.getRunningNames().includes(name)) {
+			await this.mcpManager.stopServer(name);
+			await this.refreshMcpTools();
+			this.notice(style.gray(`MCP server ${name} stopped.`));
+			return;
+		}
+
+		const names = all ? allNames.filter((server) => !this.mcpManager.getRunningNames().includes(server)) : [name!];
+		this.notice(style.gray(`Starting MCP ${names.length === 1 ? `server ${names[0]}` : "servers"}…`));
+		this.tui.requestRender();
+		for (const server of names) {
+			try {
+				await this.mcpManager.startServer(server);
+			} catch (error) {
+				this.notice(style.red(error instanceof Error ? error.message : String(error)));
+			}
+		}
+		const count = await this.refreshMcpTools();
+		this.notice(style.gray(`MCP tools loaded: ${count}.`));
+	}
+
+	/**
+	 * Give the agent the tools of every running MCP server, and say which were renamed to avoid a clash and which
+	 * servers did not answer. Returns how many tools there are.
+	 */
+	private async refreshMcpTools(): Promise<number> {
+		const { tools, renamed, failed } = await this.mcpManager.tools(BUILTIN_TOOL_NAMES);
+		this.agent.setMcpTools(tools);
+		if (renamed.length > 0)
+			this.notice(style.yellow(`Renamed MCP tools that clash with others: ${renamed.join(", ")}.`));
+		if (failed.length > 0)
+			this.notice(style.yellow(`MCP servers that did not list their tools: ${failed.join(", ")}.`));
+		const agentOnly = tools.filter((tool) => !tool.readOnly).length;
+		if (agentOnly > 0 && this.agent.interactionMode !== "agent") {
+			this.notice(style.gray(`${agentOnly} MCP tool(s) can change things, so they wait for agent mode.`));
 		}
 		this.updateFooter();
+		return tools.length;
 	}
 
 	/**
@@ -1095,7 +1208,12 @@ class InteractiveApp {
 		this.updateFooter();
 	}
 
-	private changeDirectory(args: string): void {
+	/**
+	 * `/cd <path>`: carry on in another directory. Everything tied to the project follows: the agent's prompt and
+	 * tools, the sandbox's writable project, the MemPalace wing, mcp.yml and the MCP servers (restarted there), the
+	 * sessions list, and a new session file in the new directory.
+	 */
+	private async changeDirectory(args: string): Promise<void> {
 		if (!this.requireIdle()) return;
 		const pathArg = args.trim();
 		if (!pathArg) {
@@ -1103,7 +1221,7 @@ class InteractiveApp {
 			return;
 		}
 
-		const newPath = resolve(this.options.cwd, pathArg);
+		const newPath = resolve(this.options.cwd, expandHome(pathArg));
 		let isDirectory = false;
 		try {
 			isDirectory = statSync(newPath).isDirectory();
@@ -1122,26 +1240,46 @@ class InteractiveApp {
 			return;
 		}
 
-		// Close out old session
 		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
-		this.notice(style.gray(`Session continued in ${newPath}`));
-
-		// Update paths
 		this.options.cwd = newPath;
 		this.agent.setCwd(newPath);
-		if (this.agent.model) {
-			this.agent.tools = createToolsForModel(this.agent.model, this.options.cwd, this.toolOptions());
-		}
-		this.editor.setAutocompleteProvider(
-			new CombinedAutocompleteProvider(slashCommands(this.options.config.models), this.options.cwd),
-		);
+		// Bash may write in the project it is working on, not the one it left.
+		const sandbox = currentSandbox();
+		if (sandbox) setSandbox(sandboxPolicy(sandbox.level, newPath, this.options.config.sandbox?.writable));
 
-		// Start new session using existing clear logic, which also wipes the UI
+		// Saves the conversation to the old project's wing, then starts a session file in the new directory.
 		this.newSession();
-
-		// Then post the breadcrumb in the new session
+		this.memoryWing = readMemoryWing(newPath);
+		if (this.agent.model) {
+			this.agent.tools = createToolsForModel(this.agent.model, newPath, this.toolOptions());
+		}
 		this.notice(style.gray(`Session continued from ${oldPath}`));
 		this.session?.addEvent({ kind: "cd", from: oldPath, to: newPath });
+
+		// MCP servers run in the project and come from its mcp.yml, so restart the running ones here.
+		const running = this.mcpManager.getRunningNames();
+		await this.mcpManager.stopAll();
+		this.mcpManager = new McpManager(newPath);
+		const available = this.mcpManager.getServerNames();
+		const restart = running.filter((name) => available.includes(name));
+		const dropped = running.filter((name) => !available.includes(name));
+		for (const name of restart) {
+			try {
+				await this.mcpManager.startServer(name);
+			} catch (error) {
+				this.notice(style.red(error instanceof Error ? error.message : String(error)));
+			}
+		}
+		if (running.length > 0) {
+			await this.refreshMcpTools();
+			if (restart.length > 0) this.notice(style.gray(`Restarted MCP servers here: ${restart.join(", ")}.`));
+			if (dropped.length > 0)
+				this.notice(style.yellow(`Not in this directory's mcp.yml, so stopped: ${dropped.join(", ")}.`));
+		}
+		this.editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(slashCommands(this.options.config.models, available), newPath),
+		);
+		this.updateFooter();
 	}
 
 	private switchInteractionMode(mode: InteractionMode): void {
@@ -1153,6 +1291,8 @@ class InteractiveApp {
 		if (this.agent.model) this.session?.updateSettings(this.sessionSettings(this.agent.model));
 		const note = this.agent.isRunning ? " (from the next message)" : "";
 		this.notice(style.gray(`Switched to ${mode} mode${note}.`));
+		const held = mode === "agent" ? 0 : this.agent.mcpTools.filter((tool) => !tool.readOnly).length;
+		if (held > 0) this.notice(style.gray(`${held} MCP tool(s) can change things, so they wait for agent mode.`));
 		this.updateFooter();
 	}
 
@@ -2193,8 +2333,14 @@ class InteractiveApp {
 		this.agent.setInteractionMode(saved?.interactionMode ?? "agent");
 		this.agent.setWeb(saved?.web ?? true);
 		this.agent.setRag(this.knowledgeBase !== undefined && saved?.rag === true);
+		const browserChanged = this.agent.browser !== (saved?.browser === true);
+		this.agent.setBrowser(saved?.browser === true);
+		const subagentChanged = this.agent.subagent !== (saved?.subagent === true);
+		this.agent.setSubagent(saved?.subagent === true);
 		this.agent.setPonytail(saved?.ponytail ?? "off");
-		if (model && modelChanged) this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
+		if (model && (modelChanged || browserChanged || subagentChanged)) {
+			this.agent.tools = createToolsForModel(model, this.options.cwd, this.toolOptions());
+		}
 		if (this.options.saveSessions && model) {
 			this.session = SessionFile.resume(loaded, this.sessionSettings(model));
 		}
