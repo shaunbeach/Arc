@@ -912,15 +912,17 @@ class InteractiveApp {
 	}
 
 	/**
-	 * Tool settings that follow the session. web_fetch reaches local addresses only in agent mode: in plan and chat
-	 * modes the web tools are all the model has, and a page must not be able to steer it into the local network.
+	 * Tool settings that follow the session. web_fetch reaches local addresses, and read opens files outside the
+	 * project, only in agent mode: in plan and chat modes the web tools and read are all the model has, and a page
+	 * must not be able to steer it into the local network or into sending out a file such as ~/.ssh/id_rsa.
 	 */
 	private toolOptions(): Pick<
 		CodingToolOptions,
-		"allowLocalNetwork" | "knowledgeBase" | "memory" | "browser" | "subagent"
+		"allowLocalNetwork" | "readAnywhere" | "knowledgeBase" | "memory" | "browser" | "subagent"
 	> {
 		return {
 			allowLocalNetwork: () => this.agent.interactionMode === "agent",
+			readAnywhere: () => this.agent.interactionMode === "agent",
 			knowledgeBase: this.knowledgeBase,
 			memory: this.memoryWing || palaceExists() ? { wing: this.memoryWing } : undefined,
 			browser: this.agent.browser,

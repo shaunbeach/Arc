@@ -190,6 +190,8 @@ The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`,
 | plan | read, web_search, web_fetch, and read-only MCP tools | research the project and write a plan, without changing files |
 | chat | read, web_search, web_fetch, and read-only MCP tools | talk, look things up, ask about files |
 
+In plan and chat modes `read` opens only files in the project (the git repository, as for the [sandbox](#sandbox)), symlinks included, so a page the model reads cannot steer it into sending out a file such as `~/.ssh/id_rsa`; agent mode reads anywhere, as bash could anyway.
+
 Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`; `browser_capture` and `deep_research` are agent-mode tools. The mode and the `/web`, `/rag`, `/browser`, `/subagent`, and `/ponytail` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on, the knowledge base off, and ponytail off.
 
 ## Web tools

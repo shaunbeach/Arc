@@ -32,6 +32,12 @@ export interface CodingToolOptions {
 	 * agent mode, where bash reaches them anyway.
 	 */
 	allowLocalNetwork?: () => boolean;
+	/**
+	 * Whether read may open files outside the project right now. Default: yes. The app allows it only in agent mode:
+	 * in plan and chat modes read sits beside the web tools with nothing else, and a page must not be able to steer
+	 * the model into reading ~/.ssh and sending it out in a URL.
+	 */
+	readAnywhere?: () => boolean;
 	/** The offline archives kb_search reads (models.yml `rag:`). Without one, there is no kb_search. */
 	knowledgeBase?: KnowledgeBase;
 	/**

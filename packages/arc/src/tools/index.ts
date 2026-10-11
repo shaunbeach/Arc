@@ -54,13 +54,17 @@ export function createCodingTools(options: CodingToolOptions): AgentTool[] {
 export function createToolsForModel(
 	model: LiteModel,
 	cwd: string,
-	options: Pick<CodingToolOptions, "allowLocalNetwork" | "knowledgeBase" | "memory" | "browser" | "subagent"> = {},
+	options: Pick<
+		CodingToolOptions,
+		"allowLocalNetwork" | "readAnywhere" | "knowledgeBase" | "memory" | "browser" | "subagent"
+	> = {},
 ): AgentTool[] {
 	return createCodingTools({
 		cwd,
 		limits: toolLimitsFor(model.contextWindow, model.maxTokens),
 		acceptsImages: model.input.includes("image"),
 		allowLocalNetwork: options.allowLocalNetwork,
+		readAnywhere: options.readAnywhere,
 		knowledgeBase: options.knowledgeBase,
 		memory: options.memory,
 		browser: options.browser,

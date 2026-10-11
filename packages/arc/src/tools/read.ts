@@ -1,9 +1,11 @@
+import { realpathSync } from "node:fs";
 import { type FileHandle, open, readdir, readFile, stat } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, isAbsolute, relative } from "node:path";
 import { Type } from "typebox";
 import type { AgentTool, ToolResult } from "../agent/types.ts";
 import type { CodingToolOptions, ToolLimits } from "./options.ts";
 import { resolveExistingToolPath, similarNamesHint } from "./path-utils.ts";
+import { projectRoot } from "./sandbox.ts";
 import { formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const readSchema = Type.Object({
@@ -30,6 +32,21 @@ const BINARY_SNIFF_BYTES = 8192;
 /** Above this size, a file is read only up to the requested page instead of loaded whole. */
 const LARGE_FILE_BYTES = 10 * 1024 * 1024;
 const CHUNK_BYTES = 64 * 1024;
+
+/** `path` with symlinks resolved as far as it exists, so a link inside the project cannot point read outside it. */
+function realPath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/** Whether `path` is the project folder or inside it. */
+function insideProject(path: string, cwd: string): boolean {
+	const fromRoot = relative(realPath(projectRoot(cwd)), realPath(path));
+	return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+}
 
 function textResult(text: string, details?: ReadToolDetails): ToolResult<ReadToolDetails> {
 	return { content: [{ type: "text", text }], details };
@@ -206,6 +223,12 @@ export function createReadTool(options: CodingToolOptions): AgentTool<typeof rea
 		parameters: readSchema,
 		async execute(_toolCallId, { path, offset, limit }, signal) {
 			const absolutePath = resolveExistingToolPath(path, options.cwd);
+			// Checked before anything is looked up, so a refused path does not even say whether it exists.
+			if (!(options.readAnywhere?.() ?? true) && !insideProject(absolutePath, options.cwd)) {
+				throw new Error(
+					`In plan and chat modes read opens only files in the project (${projectRoot(options.cwd)}); ${path} is outside it. Switch to /agent to read it.`,
+				);
+			}
 			const info = await stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
 				if (error.code !== "ENOENT") throw new Error(`Cannot read ${path}: ${error.message}`);
 				const hint = similarNamesHint(path, options.cwd);

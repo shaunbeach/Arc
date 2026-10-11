@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -405,5 +405,42 @@ describe("leftover processes", () => {
 			setLeftoverLimit(undefined);
 			killLeftoverProcesses();
 		}
+	});
+});
+
+describe("read outside agent mode", () => {
+	/** A git project with a file, a subfolder, and a secret beside it, outside the project. */
+	function project(readAnywhere: boolean) {
+		const base = realpathSync(mkdtempSync(join(tmpdir(), "arc-read-scope-")));
+		const root = join(base, "project");
+		mkdirSync(join(root, ".git"), { recursive: true });
+		mkdirSync(join(root, "src"));
+		writeFileSync(join(root, "src", "app.ts"), "export const app = 1;\n");
+		writeFileSync(join(base, "secret.txt"), "id_rsa contents\n");
+		symlinkSync(join(base, "secret.txt"), join(root, "link-to-secret"));
+		// Started in a subfolder: the project is still the repository.
+		const tool = createReadTool({ ...setup(), cwd: join(root, "src"), readAnywhere: () => readAnywhere });
+		return { base, root, tool };
+	}
+
+	it("opens files anywhere in the project, from a subfolder too", async () => {
+		const { root, tool } = project(false);
+		expect(text(await run(tool, { path: "app.ts" }))).toContain("export const app = 1;");
+		expect(text(await run(tool, { path: join(root, ".git") }))).toBe("(empty directory)");
+	});
+
+	it("refuses paths outside the project, by ../, absolute path, or symlink", async () => {
+		const { base, root, tool } = project(false);
+		const refused = /read opens only files in the project .* is outside it\. Switch to \/agent/;
+		await expect(run(tool, { path: "../../secret.txt" })).rejects.toThrow(refused);
+		await expect(run(tool, { path: join(base, "secret.txt") })).rejects.toThrow(refused);
+		await expect(run(tool, { path: join(root, "link-to-secret") })).rejects.toThrow(refused);
+		// Without saying whether a missing file exists.
+		await expect(run(tool, { path: join(base, "missing.txt") })).rejects.toThrow(refused);
+	});
+
+	it("reads anywhere in agent mode", async () => {
+		const { base, tool } = project(true);
+		expect(text(await run(tool, { path: join(base, "secret.txt") }))).toContain("id_rsa contents");
 	});
 });
