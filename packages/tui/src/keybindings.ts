@@ -32,6 +32,7 @@ export interface Keybindings {
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
+	"tui.input.submitForce": true;
 	"tui.input.tab": true;
 	"tui.input.copy": true;
 	// Generic selection actions
@@ -142,6 +143,7 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo" },
 	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
+	"tui.input.submitForce": { defaultKeys: "alt+enter", description: "Force submit and interrupt" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },
 	"tui.input.copy": { defaultKeys: "ctrl+c", description: "Copy selection" },
 	"tui.select.up": { defaultKeys: "up", description: "Move selection up" },

@@ -355,6 +355,7 @@ export class Editor implements Component, Focusable {
 	private undoStack = new UndoStack<EditorSnapshot>();
 
 	public onSubmit?: (text: string) => void;
+	public onSubmitForce?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
 
@@ -893,6 +894,11 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Submit (Enter)
+		if (kb.matches(data, "tui.input.submitForce")) {
+			if (this.disableSubmit) return;
+			this.submitValue(true);
+			return;
+		}
 		if (kb.matches(data, "tui.input.submit")) {
 			if (this.disableSubmit) return;
 
@@ -1349,7 +1355,7 @@ export class Editor implements Component, Focusable {
 		return this.state.cursorCol > 0 && currentLine[this.state.cursorCol - 1] === "\\";
 	}
 
-	private submitValue(): void {
+	private submitValue(force = false): void {
 		this.cancelAutocomplete();
 		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
 
@@ -1362,7 +1368,8 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 
 		if (this.onChange) this.onChange("");
-		if (this.onSubmit) this.onSubmit(result);
+		if (force && this.onSubmitForce) this.onSubmitForce(result);
+		else if (this.onSubmit) this.onSubmit(result);
 	}
 
 	private handleBackspace(): void {
