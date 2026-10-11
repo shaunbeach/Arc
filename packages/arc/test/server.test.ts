@@ -9,10 +9,12 @@ import {
 	buildServerArgs,
 	isServerBusy,
 	LlamaServerManager,
+	ServedModelMismatchError,
 	serverOrigin,
 	waitForSlotsIdle,
 	withSlotSavePath,
 } from "../src/llm/server.ts";
+import { criticModel } from "../src/supervisor/critic.ts";
 
 const model: LiteModel = {
 	name: "test-model",
@@ -283,6 +285,57 @@ describe("LlamaServerManager", () => {
 			fetch: listing("qwen3.6-35b-a3b_4-Bit"),
 		});
 		await expect(other.ensure(discovered)).rejects.toThrow(/serving qwen3\.6-35b-a3b_4-Bit/);
+		await expect(other.ensure(discovered)).rejects.toBeInstanceOf(ServedModelMismatchError);
+	});
+
+	it("notices when an attached discover server switches models", async () => {
+		let served = "/models/qwen36.gguf";
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			spawn: () => {
+				throw new Error("should not spawn");
+			},
+			fetch: routes((path) =>
+				path === "/props" ? Response.json({ model_path: served }) : new Response("{}", { status: 200 }),
+			),
+		});
+		const discovered = { ...model, discover: true, modelPath: "/models/qwen36.gguf" };
+		await manager.ensure(discovered);
+		await manager.ensure(discovered);
+		served = "/models/katcoder.gguf";
+		await expect(manager.ensure(discovered)).rejects.toBeInstanceOf(ServedModelMismatchError);
+	});
+
+	it("reviews on the actor's server when the critic is the actor's model", async () => {
+		const spawned: (readonly string[])[] = [];
+		const children: FakeChild[] = [];
+		const manager = new LlamaServerManager({
+			logFile: logFile(),
+			pollIntervalMs: 1,
+			spawn: (command: string, args: readonly string[]) => {
+				spawned.push(args);
+				const child = new FakeChild(command);
+				children.push(child);
+				return child as unknown as ChildProcess;
+			},
+			// Up while the last server started is running.
+			fetch: routes(() =>
+				children.length === 0 || children[children.length - 1].signals.length > 0
+					? "down"
+					: new Response("{}", { status: 200 }),
+			),
+		});
+		const actor = { ...model, contextWindow: 131_072, launchArgs: ["--ctx-size", "131072"] };
+		await manager.ensure(actor);
+		await manager.ensure(criticModel(actor, true));
+		await manager.ensure(actor);
+		expect(spawned).toHaveLength(1);
+		expect(criticModel(actor, true).contextWindow).toBeLessThan(actor.contextWindow);
+
+		// A separate critic at its own --ctx-size is a second launch.
+		await manager.ensure(criticModel(actor, false));
+		expect(spawned).toHaveLength(2);
+		await manager.stop();
 	});
 
 	it("refuses a running server that serves another model", async () => {

@@ -84,7 +84,9 @@ export type SessionEvent =
 	/** Swap in use reached a new high during a run. */
 	| { kind: "swap"; usedBytes: number }
 	/** The user changed the working directory with /cd. */
-	| { kind: "cd"; from: string; to: string };
+	| { kind: "cd"; from: string; to: string }
+	/** A `discover` entry's server came back with another model, and Arc reconnected to it. */
+	| { kind: "model-change"; model: string; from: string; to: string };
 
 export interface LoadedSession {
 	path: string;

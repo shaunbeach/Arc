@@ -154,3 +154,22 @@ export function resolveDiscoveredModel(placeholder: LiteModel, props: ServerProp
 		buildInfo: props.buildInfo,
 	};
 }
+
+/**
+ * Connect a `discover` placeholder without asking anyone: for the supervisor's critic, and for reconnecting after the
+ * server was restarted with another model. A server listing several models needs someone to pick one, so here that
+ * is an error, as is a server that does not answer.
+ */
+export async function connectDiscovered(
+	placeholder: LiteModel,
+	fetchFn: typeof fetch = fetch,
+	signal?: AbortSignal,
+): Promise<{ model: LiteModel; props: ServerProps } | { error: string }> {
+	const origin = serverOrigin(placeholder.baseUrl);
+	const props = await fetchServerProps(placeholder.baseUrl, fetchFn, signal);
+	if (!props) return { error: `Nothing is serving at ${origin}. Start the server there, then try again.` };
+	if (props.listed) {
+		return { error: `${origin} lists several models. Pick one with /model ${placeholder.name}.` };
+	}
+	return { model: resolveDiscoveredModel(placeholder, props), props };
+}

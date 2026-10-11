@@ -48,6 +48,16 @@ export function asCritic(model: LiteModel): LiteModel {
 	return { ...model, contextWindow, maxTokens: Math.min(model.maxTokens, VERDICT_TOKENS), launchArgs };
 }
 
+/**
+ * The critic as the supervisor loads it. On the actor's own model it keeps the actor's launch arguments, so the
+ * server already running serves the review: launched at the critic's `--ctx-size` it would load twice per review,
+ * once for the critic and once more for the actor's next turn. Requests are still sized to the critic's window.
+ */
+export function criticModel(base: LiteModel, onActorServer: boolean): LiteModel {
+	const critic = asCritic(base);
+	return onActorServer ? { ...critic, launchArgs: base.launchArgs } : critic;
+}
+
 /** Whether the critic loads a vision projector, so screenshots go to it as images rather than as paths. */
 export function criticSeesImages(model: LiteModel): boolean {
 	return model.mmproj !== undefined || hasFlag(model.launchArgs, ["--mmproj", "-mm"]);

@@ -110,7 +110,7 @@ export interface SupervisorHost {
 	 * Returns how many were stopped.
 	 */
 	stopLeftovers(): number;
-	/** Stop the actor's server and start the critic's; resolves with the critic as launched. */
+	/** Start the critic's server, stopping the actor's unless they share one; resolves with the critic as launched. */
 	loadCritic(signal: AbortSignal): Promise<LiteModel>;
 	save(state: SupervisorState): void;
 	notice(text: string, tone: "info" | "good" | "bad"): void;

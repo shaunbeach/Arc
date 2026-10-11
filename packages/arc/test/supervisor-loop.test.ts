@@ -418,6 +418,19 @@ describe("supervisor report", () => {
 		expect(markdown).toContain("- Critic tokens: 3,000 in, 12 out, 3 reviews");
 	});
 
+	it("lists a discover server's model changes with the phase they happened in", () => {
+		const change: SessionEntry = {
+			type: "event",
+			event: { kind: "model-change", model: "Stowaway", from: "qwen36", to: "katcoder" },
+			timestamp: 150 * s,
+		};
+		const report = buildReport([...entries, change], new Map([[1, "Types"]]));
+		if (!report) throw new Error("no report");
+		expect(report.modelChanges).toEqual([{ model: "Stowaway", from: "qwen36", to: "katcoder", phase: 2 }]);
+		expect(formatReportText(report)).toContain("model changes: Stowaway: qwen36 → katcoder (phase 2)");
+		expect(formatReportMarkdown(report)).toContain("- Model changes: Stowaway: qwen36 → katcoder (phase 2)");
+	});
+
 	it("counts verdicts, loop-guard stops, hints, tools, and events, and names the setup", () => {
 		const run = {
 			actor: "Qwen",

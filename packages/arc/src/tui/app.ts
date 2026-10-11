@@ -24,8 +24,20 @@ import { findModel, type LiteModel, type ModelsConfig, modelLabel } from "../con
 import { expandHome, getAppDir } from "../config/paths.ts";
 import { defaultSamplingMode, type SamplingMode } from "../config/sampling.ts";
 import { describeTrim } from "../context.ts";
-import { fetchServerProps, listedProps, resolveDiscoveredModel, type ServerProps } from "../llm/discover.ts";
-import { getLocalIpAddress, type LlamaServerManager, serverOrigin, serverPort } from "../llm/server.ts";
+import {
+	connectDiscovered,
+	fetchServerProps,
+	listedProps,
+	resolveDiscoveredModel,
+	type ServerProps,
+} from "../llm/discover.ts";
+import {
+	getLocalIpAddress,
+	type LlamaServerManager,
+	ServedModelMismatchError,
+	serverOrigin,
+	serverPort,
+} from "../llm/server.ts";
 import {
 	DEFAULT_SWAP_THRESHOLD_BYTES,
 	describeMemory,
@@ -61,7 +73,7 @@ import {
 	type SessionSummary,
 	sessionLabel,
 } from "../session.ts";
-import { asCritic } from "../supervisor/critic.ts";
+import { criticModel } from "../supervisor/critic.ts";
 import { type CommitStats, commitStats, isClean, isGitRepo } from "../supervisor/git.ts";
 import { RepeatGuard } from "../supervisor/guard.ts";
 import { formatLint, lintPlan } from "../supervisor/lint.ts";
@@ -712,12 +724,18 @@ class InteractiveApp {
 		this.serverStart = controller;
 		this.setAiStatus("working");
 		const started = Date.now();
+		const onStatus = (message: string) => this.setStatus(message);
 		try {
-			await this.options.manager.ensure(model, {
-				signal: controller.signal,
-				onStatus: (message) => this.setStatus(message),
-			});
-			this.recordLoad(model, Date.now() - started);
+			try {
+				await this.options.manager.ensure(model, { signal: controller.signal, onStatus });
+			} catch (error) {
+				if (!(error instanceof ServedModelMismatchError) || !model.discover || controller.signal.aborted)
+					throw error;
+				// The server behind a discover entry came back with another model: that is what the entry stands for.
+				const next = await this.reconnectDiscovered(model, controller.signal);
+				await this.options.manager.ensure(next, { signal: controller.signal, onStatus });
+			}
+			this.recordLoad(this.agent.model ?? model, Date.now() - started);
 			return true;
 		} catch (error) {
 			this.notice(
@@ -1447,7 +1465,16 @@ class InteractiveApp {
 				const name = this.criticOverride ?? this.options.config.supervisor?.critic;
 				const found = name ? findModel(this.options.config.models, name) : undefined;
 				if (!found) throw new Error(`No critic: ${name ?? "models.yml has no supervisor.critic"}.`);
-				const critic = asCritic(found);
+				const actor = this.agent.model;
+				const sameAsActor = actor !== undefined && actor.name === found.name;
+				let base = sameAsActor ? actor : found;
+				// A discover entry is a placeholder until its server says what it runs; its window sizes the review.
+				if (base.discover && isUnresolved(base)) {
+					const connected = await connectDiscovered(base, fetch, signal);
+					if ("error" in connected) throw new Error(`Critic ${base.name}: ${connected.error}`);
+					base = connected.model;
+				}
+				const critic = criticModel(base, sameAsActor);
 				await this.serverTask;
 				this.setAiStatus("working");
 				const started = Date.now();
@@ -1578,8 +1605,8 @@ class InteractiveApp {
 		}
 		if (args.trim()) {
 			const critic = findModel(this.options.config.models, args.trim());
-			if (!critic || critic.discover) {
-				this.notice(style.red(`No local model matches "${args.trim()}".`));
+			if (!critic) {
+				this.notice(style.red(`No model matches "${args.trim()}".`));
 				return;
 			}
 			this.criticOverride = critic.name;
@@ -1977,6 +2004,39 @@ class InteractiveApp {
 	 * Ask the server at the placeholder's baseUrl what it is running, then adopt that. The model, its window, and
 	 * whether it takes images all come from the reply, so models.yml never has to describe a machine it cannot see.
 	 */
+	/**
+	 * Adopt what a discover entry's server runs now, after it was restarted with another model. Everything about the
+	 * model is read again (window, thinking, served name), not just its path, and the change is announced and recorded,
+	 * so replies changing style mid-session, or mid-run, have an explanation. Throws when the server cannot say.
+	 */
+	private async reconnectDiscovered(previous: LiteModel, signal: AbortSignal): Promise<LiteModel> {
+		const placeholder = findModel(this.options.config.models, previous.name) ?? previous;
+		const origin = serverOrigin(previous.baseUrl);
+		const connected = await connectDiscovered(placeholder, fetch, signal);
+		if ("error" in connected)
+			throw new Error(`${origin} now runs another model, and Arc could not reconnect: ${connected.error}`);
+		const next = connected.model;
+		// Keep the sampling mode unless the new model's thinking switch differs.
+		const mode = next.reasoning === previous.reasoning ? this.agent.mode : defaultSamplingMode(next);
+		this.adoptModel(next, mode);
+		const window =
+			next.contextWindow === previous.contextWindow
+				? ""
+				: ` · ctx ${formatTokens(previous.contextWindow)} → ${formatTokens(next.contextWindow)}${
+						next.contextWindow < previous.contextWindow ? " (older messages are trimmed to fit)" : ""
+					}`;
+		this.notice(
+			style.yellow(`${origin} now runs ${modelLabel(next)} (was ${modelLabel(previous)}); reconnected${window}.`),
+		);
+		this.session?.addEvent({
+			kind: "model-change",
+			model: next.name,
+			from: modelLabel(previous),
+			to: modelLabel(next),
+		});
+		return next;
+	}
+
 	private async resolveDiscovered(placeholder: LiteModel): Promise<boolean> {
 		const origin = serverOrigin(placeholder.baseUrl);
 		this.setAiStatus("working");

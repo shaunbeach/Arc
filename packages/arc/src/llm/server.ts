@@ -201,6 +201,23 @@ function sameServer(a: LiteModel, b: LiteModel): boolean {
  * launch arguments, stops a server it spawned when a different one is needed, and never kills a server it did not
  * spawn.
  */
+/**
+ * The server at a model's address runs another model. For a `discover` entry that is expected: the server was
+ * restarted with another model, and the app reconnects to it. For any other entry, something else took the port.
+ */
+export class ServedModelMismatchError extends Error {
+	readonly servedPath: string | undefined;
+
+	constructor(origin: string, model: LiteModel, servedPath: string | undefined) {
+		const advice = model.discover
+			? `Run /model ${model.name} to connect to it.`
+			: `Stop that server or give ${model.name} another port in models.yml.`;
+		super(`llama-server at ${origin} is serving ${servedPath ?? "an unknown model"}, not ${model.name}. ${advice}`);
+		this.name = "ServedModelMismatchError";
+		this.servedPath = servedPath;
+	}
+}
+
 export class LlamaServerManager {
 	private readonly logFile: string;
 	private readonly fetchFn: typeof fetch;
@@ -235,6 +252,14 @@ export class LlamaServerManager {
 		const { signal, onStatus } = options;
 		const origin = serverOrigin(model.baseUrl);
 		if (this.active && sameServer(this.active, model) && (await this.health(origin, signal)) === "ready") {
+			// Someone else runs a discover entry's server and may restart it with another model at any time, so ask
+			// which one it runs before each use rather than trusting what it ran last time.
+			if (model.discover) {
+				const servedPath = await this.servedModelPath(origin, model, signal);
+				if (servedPath === undefined || !samePath(servedPath, model.modelPath)) {
+					throw new ServedModelMismatchError(origin, model, servedPath);
+				}
+			}
 			this.active = model;
 			return;
 		}
@@ -252,10 +277,7 @@ export class LlamaServerManager {
 			if (state === "loading") await this.waitUntilReady(origin, undefined, signal);
 			const servedPath = await this.servedModelPath(origin, model, signal);
 			if (servedPath === undefined || !samePath(servedPath, model.modelPath)) {
-				throw new Error(
-					`llama-server at ${origin} is serving ${servedPath ?? "an unknown model"}, not ${model.name}. ` +
-						`Stop that server or give ${model.name} another port in models.yml.`,
-				);
+				throw new ServedModelMismatchError(origin, model, servedPath);
 			}
 			this.active = model;
 			return;

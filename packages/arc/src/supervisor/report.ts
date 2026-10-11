@@ -49,6 +49,8 @@ export interface RunReport {
 	status: SupervisorState["status"];
 	run?: RunInfo;
 	modelLoads: { model: string; ms: number }[];
+	/** Discover entries whose server came back with another model during the run, and the phase it happened in. */
+	modelChanges: { model: string; from: string; to: string; phase?: number }[];
 	peakSwapBytes?: number;
 }
 
@@ -189,11 +191,18 @@ export function buildReport(
 	const startedAt = saves[0].timestamp;
 	const endedAt = report.at(-1)?.endedAt ?? last.timestamp;
 	const modelLoads: { model: string; ms: number }[] = [];
+	const modelChanges: RunReport["modelChanges"] = [];
 	let peakSwapBytes: number | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "event" || entry.timestamp < startedAt || entry.timestamp > endedAt) continue;
 		if (entry.event.kind === "model-load") modelLoads.push({ model: entry.event.model, ms: entry.event.ms });
 		if (entry.event.kind === "swap") peakSwapBytes = Math.max(peakSwapBytes ?? 0, entry.event.usedBytes);
+		if (entry.event.kind === "model-change") {
+			const { model, from, to } = entry.event;
+			const at = entry.timestamp;
+			const phase = report.find((candidate) => candidate.startedAt <= at && at <= candidate.endedAt)?.phase;
+			modelChanges.push({ model, from, to, ...(phase !== undefined ? { phase } : {}) });
+		}
 	}
 	const run = saves.find((save) => save.state.run)?.state.run;
 	return {
@@ -204,6 +213,7 @@ export function buildReport(
 		status: last.state.status,
 		...(run ? { run } : {}),
 		modelLoads,
+		modelChanges,
 		...(peakSwapBytes !== undefined ? { peakSwapBytes } : {}),
 	};
 }
@@ -253,6 +263,13 @@ function describeRun(run: RunInfo): string {
 }
 
 /** Model loads, grouped by model: `Qwen x9 (avg 14s), Ornith x9 (avg 6s)`. */
+/** `Stowaway: qwen36 → katcoder (phase 3)`, for each change. */
+function describeChanges(changes: RunReport["modelChanges"]): string {
+	return changes
+		.map(({ model, from, to, phase }) => `${model}: ${from} → ${to}${phase !== undefined ? ` (phase ${phase})` : ""}`)
+		.join(", ");
+}
+
 function describeLoads(loads: RunReport["modelLoads"]): string {
 	const byModel = new Map<string, number[]>();
 	for (const load of loads) byModel.set(load.model, [...(byModel.get(load.model) ?? []), load.ms]);
@@ -322,6 +339,7 @@ export function formatReportText(report: RunReport): string {
 		plural(t.hints, "hint"),
 		`${plural(t.failedTools, "failed tool call")} of ${n(t.toolCalls)}`,
 		...(report.modelLoads.length > 0 ? [`loads: ${describeLoads(report.modelLoads)}`] : []),
+		...(report.modelChanges.length > 0 ? [`model changes: ${describeChanges(report.modelChanges)}`] : []),
 		...(report.peakSwapBytes !== undefined ? [`peak swap ${gigabytes(report.peakSwapBytes)}`] : []),
 	];
 	lines.push(`Events: ${events.join(" · ")}.`);
@@ -388,6 +406,7 @@ export function formatReportMarkdown(report: RunReport): string {
 	lines.push("", "## Setup and events", "");
 	if (report.run) lines.push(`- Setup: ${describeRun(report.run)}`);
 	if (report.modelLoads.length > 0) lines.push(`- Model loads: ${describeLoads(report.modelLoads)}`);
+	if (report.modelChanges.length > 0) lines.push(`- Model changes: ${describeChanges(report.modelChanges)}`);
 	if (report.peakSwapBytes !== undefined) lines.push(`- Peak swap: ${gigabytes(report.peakSwapBytes)}`);
 	lines.push(`- Processes the actor left running, stopped before checks: ${t.leftovers}`);
 	return `${lines.join("\n")}\n`;

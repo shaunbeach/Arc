@@ -444,7 +444,6 @@ export function parseModelsConfig(text: string, path: string, options: ParseMode
 		if (!critic) throw configError("supervisor.critic", "is required");
 		const model = findModel(models, critic);
 		if (!model) throw configError("supervisor.critic", `names no model: ${critic}`);
-		if (model.discover) throw configError("supervisor.critic", "must be a model Arc can start, not a discover entry");
 		supervisor = {
 			critic: model.name,
 			maxRetries: readPositiveInt(root.supervisor, "maxRetries", "supervisor") ?? 3,

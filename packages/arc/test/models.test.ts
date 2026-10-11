@@ -256,6 +256,14 @@ describe("supervisor", () => {
 		expect(parse(CONFIG).supervisor).toBeUndefined();
 	});
 
+	it("accepts a discover entry as the critic", () => {
+		const remote = `${CONFIG.replace(
+			"providers:\n",
+			"providers:\n  remote:\n    baseUrl: http://localhost:8081/v1\n    discover: true\n",
+		)}\nsupervisor:\n  critic: remote\n`;
+		expect(parse(remote).supervisor?.critic).toBe("remote");
+	});
+
 	it("needs a critic that names a model", () => {
 		expect(() => parse(withSupervisor("supervisor:\n  maxRetries: 2"))).toThrow(/supervisor.critic is required/);
 		expect(() => parse(withSupervisor("supervisor:\n  critic: nobody"))).toThrow(/names no model: nobody/);

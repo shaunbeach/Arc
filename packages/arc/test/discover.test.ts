@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LiteModel } from "../src/config/models.ts";
 import {
+	connectDiscovered,
 	DEFAULT_CONTEXT_WINDOW,
 	fetchServerProps,
 	modelNameFromPath,
@@ -222,5 +223,33 @@ describe("modelNameFromPath", () => {
 		expect(modelNameFromPath("/a/b/Ornith-1.5-9B-Q4_K_M.gguf")).toBe("Ornith-1.5-9B-Q4_K_M");
 		expect(modelNameFromPath("Qwen3.5-2B-Q4_K_M.gguf")).toBe("Qwen3.5-2B-Q4_K_M");
 		expect(modelNameFromPath("/a/b/model")).toBe("model");
+	});
+});
+
+describe("connectDiscovered", () => {
+	it("resolves the placeholder from what the server reports", async () => {
+		const result = await connectDiscovered(PLACEHOLDER, jsonFetch(PROPS));
+		expect("model" in result && result.model).toMatchObject({
+			name: "remote",
+			modelPath: PROPS.model_path,
+			contextWindow: 65536,
+			reasoning: true,
+		});
+	});
+
+	it("says why it cannot connect without someone to pick", async () => {
+		const down = (async () => {
+			throw new Error("ECONNREFUSED");
+		}) as unknown as typeof fetch;
+		expect(await connectDiscovered(PLACEHOLDER, down)).toEqual({
+			error: "Nothing is serving at http://localhost:8081. Start the server there, then try again.",
+		});
+		const several = (async (url: string) =>
+			url.endsWith("/props")
+				? { ok: false, json: async () => ({}), body: null }
+				: { ok: true, json: async () => ({ data: [{ id: "a" }, { id: "b" }] }) }) as unknown as typeof fetch;
+		expect(await connectDiscovered(PLACEHOLDER, several)).toEqual({
+			error: "http://localhost:8081 lists several models. Pick one with /model remote.",
+		});
 	});
 });
