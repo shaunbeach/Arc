@@ -275,9 +275,10 @@ class InteractiveApp {
 			browser: options.session?.settings?.browser === true,
 			subagent: options.session?.settings?.subagent === true,
 			ponytail: options.session?.settings?.ponytail,
-			tools: model ? createToolsForModel(model, cwd, this.toolOptions()) : [],
 			messages: options.session?.messages,
 		});
+		// After the agent exists: the tool options read its settings, such as /browser and /subagent.
+		if (model) this.agent.tools = createToolsForModel(model, cwd, this.toolOptions());
 		if (options.saveSessions && model) {
 			const settings = this.sessionSettings(model);
 			this.session = options.session
