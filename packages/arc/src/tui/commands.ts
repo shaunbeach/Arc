@@ -92,7 +92,7 @@ export const COMMANDS: readonly { name: CommandName; description: string; argume
 	},
 	{ name: "cd", description: "Change working directory", argumentHint: "<path>" },
 	{ name: "export", description: "Export the conversation as a markdown file", argumentHint: "[path]" },
-	{ name: "raw", description: "Print the raw scrollback for easy terminal copying" },
+	{ name: "raw", description: "Show the conversation as plain Markdown, ready to copy" },
 	{ name: "recap", description: "Ask the model to summarize the current conversation" },
 	{ name: "quit", description: "Exit" },
 ];

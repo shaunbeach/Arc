@@ -19,6 +19,8 @@ export interface ShellRunOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	onData: (data: Buffer) => void;
+	/** False runs the command outside the sandbox: for commands the user types, which the sandbox is not there to limit. */
+	sandbox?: boolean;
 }
 
 export interface ShellRunResult {
@@ -95,7 +97,7 @@ function recordLeftover(pid: number): void {
 export async function runShellCommand(command: string, cwd: string, options: ShellRunOptions): Promise<ShellRunResult> {
 	const { signal, timeoutMs, onData } = options;
 	signal?.throwIfAborted();
-	const policy = currentSandbox();
+	const policy = options.sandbox === false ? undefined : currentSandbox();
 	const { file, args } = policy ? sandboxedSpawn(SHELL, command, policy) : { file: SHELL, args: ["-c", command] };
 	const child = spawn(file, args, {
 		cwd,

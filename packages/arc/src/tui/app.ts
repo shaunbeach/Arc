@@ -84,8 +84,10 @@ import {
 	type CodingToolOptions,
 	createToolsForModel,
 	subagentSharesServer,
+	toolLimitsFor,
 } from "../tools/index.ts";
 import type { SubagentToolOptions } from "../tools/options.ts";
+import { OutputBuffer } from "../tools/output-buffer.ts";
 import {
 	currentSandbox,
 	isSandboxLevel,
@@ -110,6 +112,7 @@ import {
 	ToolView,
 	UserView,
 } from "./components.ts";
+import { displayUserText, formatShellOutput, withShellOutputs } from "./shell-output.ts";
 import { editorTheme, selectListTheme, style } from "./theme.ts";
 
 export type AppAction = "abort" | "interrupt" | "exit" | "toggleMode";
@@ -206,6 +209,10 @@ class InteractiveApp {
 	private readonly toolViews = new Map<string, ToolView>();
 	/** Messages typed while llama-server was starting, sent once the current prompt finishes. */
 	private pending: string[] = [];
+	/** The `!cmd` running now; esc aborts it. */
+	private shellRun: AbortController | undefined;
+	/** Output of `!cmd`s since the last message, sent ahead of the next one. */
+	private shellOutputs: string[] = [];
 	private forceNextPrompt = false;
 	/** True from submitting a prompt until the agent and its follow-ups finish. */
 	private busy = false;
@@ -345,7 +352,8 @@ class InteractiveApp {
 			this.swapCooldown !== undefined ||
 			this.compactRun !== undefined ||
 			this.supervisorRun !== undefined ||
-			this.testRun !== undefined;
+			this.testRun !== undefined ||
+			this.shellRun !== undefined;
 		if (matchesAction(data, "abort") && working) {
 			this.abort();
 			return { consume: true };
@@ -401,64 +409,100 @@ class InteractiveApp {
 			this.editor.setText(input);
 			this.notice(style.yellow("No model loaded. Please select a model with /model"));
 			this.pickModel();
+		} else if (this.shellRun) {
+			this.editor.setText(input);
+			this.notice(style.yellow("A command is running. Wait for it, or press esc to stop it."));
 		} else if (this.agent.isRunning) {
-			this.agent.enqueue(input);
+			this.agent.enqueue(this.takeShellOutputs(input));
 			this.notice(style.gray(`queued: ${input}`));
 		} else if (this.busy || this.supervisorRun) {
 			// While the loop runs the checks or the critic, a message waits for the actor's next turn.
-			this.pending.push(input);
+			this.pending.push(this.takeShellOutputs(input));
 			this.notice(style.gray(`queued: ${input}`));
 		} else {
-			void this.runPrompt(input);
+			void this.runPrompt(this.takeShellOutputs(input));
 		}
 	}
 
-	private runInteractiveCommand(cmd: string): void {
-		if (!cmd) return;
-		this.tui.stop();
-		console.clear();
-		try {
-			spawnSync(cmd, { shell: true, stdio: "inherit", cwd: this.options.cwd });
-		} catch (error) {
-			console.error(error);
-		}
-		// Pause briefly to let the user see the output if it exited immediately
-		console.log("\nPress Enter to return to Arc...");
-		try {
-			const buffer = Buffer.alloc(1);
-			import("node:fs").then(({ readSync }) => readSync(0, buffer, 0, 1, null)).catch(() => {});
-		} catch {}
+	/** The `!cmd` outputs to send with `input`, cleared once taken. */
+	private takeShellOutputs(input: string): string {
+		const message = withShellOutputs(this.shellOutputs, input);
+		this.shellOutputs = [];
+		return message;
+	}
 
+	/**
+	 * `!!cmd`: hand the terminal to an interactive command, such as an editor or a pager, then wait for Enter so its
+	 * output can be read before Arc draws again. Like `!`, it runs outside the sandbox: the user typed it.
+	 */
+	private runInteractiveCommand(command: string): void {
+		if (!command) return;
+		if (!this.requireIdle()) return;
+		this.tui.stop();
+		process.stdout.write("\n");
+		const result = spawnSync(command, { shell: process.env.SHELL || true, stdio: "inherit", cwd: this.options.cwd });
+		const status = result.error ? `failed: ${result.error.message}` : `exit ${result.status ?? result.signal}`;
+		process.stdout.write(`\n[${status}] Press Enter to return to Arc…`);
+		// Wait in a child that reads the terminal itself. Reading this process's stdin here would take bytes of the
+		// terminal's replies to the queries Arc sends when it starts again, and they would turn up in the editor.
+		if (process.platform !== "win32") spawnSync("/bin/sh", ["-c", "read -r _"], { stdio: "inherit" });
 		this.tui.start();
 		this.tui.requestRender(true);
-		this.notice(style.gray(`Ran interactive command: ${cmd}`));
+		this.notice(style.gray(`Ran ${command} (${status}).`));
 	}
 
-	private async runCapturedCommand(cmd: string): Promise<void> {
-		if (!cmd) return;
+	/**
+	 * `!cmd`: run a command, show its output, and send that output with the next message, so several commands can
+	 * gather context before the question. It runs outside the sandbox, which limits the model, not the user; esc stops
+	 * it. Long output keeps the end and saves the rest to a file, as the bash tool does.
+	 */
+	private async runCapturedCommand(command: string): Promise<void> {
+		if (!command) return;
 		if (!this.requireIdle()) return;
-
+		const model = this.agent.model;
+		const output = new OutputBuffer(toolLimitsFor(model?.contextWindow ?? 16_384, model?.maxTokens), {
+			saveAfterLines: 30,
+		});
+		const controller = new AbortController();
+		this.shellRun = controller;
 		this.setAiStatus("working");
-		this.notice(style.gray(`Running: ${cmd}`));
-		this.tui.requestRender();
-
+		this.notice(style.dim(`$ ${command}`));
+		let status: number | string;
+		let failure: string | undefined;
 		try {
-			const chunks: Buffer[] = [];
-			const _result = await runShellCommand(cmd, this.options.cwd, {
-				onData: (data) => chunks.push(data),
+			const result = await runShellCommand(command, this.options.cwd, {
+				signal: controller.signal,
+				sandbox: false,
+				onData: (data) => output.append(data),
 			});
-
-			let output = Buffer.concat(chunks).toString("utf8");
-			if (!output.trim()) output = "(No output)";
-
-			// Inject into the LLM context by executing a prompt with the output
-			const prompt = `I ran \`${cmd}\` and got this output:\n\`\`\`\n${output}\n\`\`\``;
-			void this.runPrompt(prompt, false);
+			status = controller.signal.aborted ? "aborted" : (result.exitCode ?? "killed");
 		} catch (error) {
-			this.notice(style.red(`Failed to run ${cmd}: ${error}`));
+			status = controller.signal.aborted ? "aborted" : "failed";
+			failure = error instanceof Error ? error.message : String(error);
+		} finally {
+			output.finish();
+			await output.closeTempFile();
+			this.shellRun = undefined;
 			this.setAiStatus("idle");
-			this.tui.requestRender();
 		}
+
+		const snapshot = output.snapshot();
+		let text = [failure, snapshot.content.trimEnd()].filter(Boolean).join("\n") || "(no output)";
+		if (snapshot.fullOutputPath) {
+			const { outputLines, totalLines } = snapshot.truncation;
+			const shown = snapshot.truncation.truncated
+				? `Showing the last ${outputLines} of ${totalLines} lines. Full output: ${snapshot.fullOutputPath}`
+				: `Full output also saved to ${snapshot.fullOutputPath}`;
+			text = `${text}\n\n[${shown}]`;
+		}
+		const lines = text.split("\n");
+		const shownLines = lines.slice(-20);
+		const hidden = lines.length - shownLines.length;
+		this.notice(style.dim([...(hidden > 0 ? [`… ${hidden} more lines`] : []), ...shownLines].join("\n")));
+		this.shellOutputs.push(formatShellOutput(command, status, text));
+		const count = this.shellOutputs.length;
+		const where = model ? "your next message" : "your first message once a model is loaded (/model)";
+		this.notice(style.gray(`[exit ${status}] ${count === 1 ? "Output" : `${count} outputs`} will go with ${where}.`));
 	}
 
 	private formatTranscript(): string {
@@ -501,17 +545,15 @@ class InteractiveApp {
 		}
 	}
 
+	/** `/raw`: the conversation as plain Markdown, added to the chat unstyled so it can be selected and copied. */
 	private showRawTranscript(): void {
-		this.tui.stop();
-		console.clear();
-		console.log(this.formatTranscript());
-		console.log("\nPress Enter to return to Arc...");
-		try {
-			const buffer = Buffer.alloc(1);
-			import("node:fs").then(({ readSync }) => readSync(0, buffer, 0, 1, null)).catch(() => {});
-		} catch {}
-		this.tui.start();
-		this.tui.requestRender(true);
+		const transcript = this.formatTranscript();
+		if (!transcript) {
+			this.notice(style.gray("Nothing to show yet."));
+			return;
+		}
+		this.notice(style.gray("Raw transcript:"));
+		this.notice(transcript);
 	}
 
 	private async recapConversation(): Promise<void> {
@@ -523,6 +565,7 @@ class InteractiveApp {
 
 	private abort(): void {
 		this.agent.abort();
+		this.shellRun?.abort();
 		this.serverStart?.abort();
 		this.swapCooldown?.abort();
 		this.compactRun?.abort();
@@ -697,7 +740,7 @@ class InteractiveApp {
 		switch (event.type) {
 			case "message_start":
 				if (event.message.role === "user") {
-					this.chat.addChild(new UserView(userText(event.message)));
+					this.chat.addChild(new UserView(displayUserText(userText(event.message))));
 				} else if (event.message.role === "assistant") {
 					this.streamingView = new AssistantView(event.message, true);
 					this.chat.addChild(this.streamingView);
@@ -1836,14 +1879,16 @@ class InteractiveApp {
 			this.notice(style.yellow("Currently serving a model. Press esc to stop serving first."));
 			return false;
 		}
-		if (!this.busy && !this.agent.isRunning && !this.supervisorRun) return true;
+		if (!this.busy && !this.agent.isRunning && !this.supervisorRun && !this.shellRun) return true;
 		this.notice(
 			style.yellow(
-				this.supervisorRun
-					? "The supervisor is running. /supervise stop or esc stops it."
-					: this.testRun
-						? "A test is running. /test stop or esc stops it."
-						: "Wait for the current request to finish, or press esc to abort it.",
+				this.shellRun
+					? "A command is running. Wait for it, or press esc to stop it."
+					: this.supervisorRun
+						? "The supervisor is running. /supervise stop or esc stops it."
+						: this.testRun
+							? "A test is running. /test stop or esc stops it."
+							: "Wait for the current request to finish, or press esc to abort it.",
 			),
 		);
 		return false;
@@ -2226,6 +2271,7 @@ class InteractiveApp {
 		if (!this.requireIdle()) return;
 		this.saveMemory();
 		this.agent.setMessages([]);
+		this.shellOutputs = [];
 		this.supervisor = undefined;
 		this.sessionName = undefined;
 		this.lastReply = undefined;
@@ -2423,7 +2469,7 @@ class InteractiveApp {
 		const toolViews = new Map<string, ToolView>();
 		for (const message of messages) {
 			if (message.role === "user") {
-				this.chat.addChild(new UserView(userText(message)));
+				this.chat.addChild(new UserView(displayUserText(userText(message))));
 			} else if (message.role === "assistant") {
 				this.chat.addChild(new AssistantView(message, false));
 				for (const block of message.content) {
