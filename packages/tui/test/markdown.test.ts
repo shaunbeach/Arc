@@ -1571,4 +1571,33 @@ bar`,
 			assert.strictEqual(partial.render(80).length, complete.render(80).length);
 		});
 	});
+
+	describe("Math", () => {
+		const plain = (source: string) =>
+			new Markdown(source, 0, 0, defaultMarkdownTheme).render(100).map((line) => stripAnsi(line).trimEnd());
+
+		it("renders delimited LaTeX as Unicode", () => {
+			assert.deepStrictEqual(plain(String.raw`Over $E$: $\iiint_E f\,dV$ and \(\frac{a+b}{2}\)`), [
+				"Over E: ∭_E f dV and (a+b)/2",
+			]);
+			assert.deepStrictEqual(plain("$$\n\\int_0^1 x^2\\,dx\n$$\n\nAfter"), ["  ∫₀¹ x² dx", "", "After"]);
+			assert.deepStrictEqual(plain("\\[ \\rho^2 \\sin\\phi \\]"), ["  ρ² sin φ"]);
+		});
+
+		it("converts bare LaTeX commands in prose", () => {
+			assert.deepStrictEqual(plain(String.raw`the integral \iiint_E f(x,y,z)\,dV extends \int_a^b f`), [
+				"the integral ∭_E f(x,y,z) dV extends ∫ₐᵇ f",
+			]);
+		});
+
+		it("leaves currency, unknown commands and code alone", () => {
+			assert.deepStrictEqual(plain("Costs $5 and $10."), ["Costs $5 and $10."]);
+			assert.deepStrictEqual(plain(String.raw`Path C:\Users\name`), [String.raw`Path C:\Users\name`]);
+			assert.deepStrictEqual(plain("Use `$x$ \\alpha` here"), ["Use $x$ \\alpha here"]);
+		});
+
+		it("hides the lone closing $ of a block that is still streaming", () => {
+			assert.deepStrictEqual(plain("$$\n\\pi r^2\n$"), ["  π r²"]);
+		});
+	});
 });

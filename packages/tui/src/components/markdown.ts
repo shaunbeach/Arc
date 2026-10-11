@@ -1,4 +1,5 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
+import { isKnownLatexCommand, latexToUnicode } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -38,7 +39,7 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 
 	// Trim streamed partial closing fences so code blocks do not shrink/flicker
 	// when the final fence character arrives. See https://github.com/earendil-works/pi/issues/5825.
-	const marker = /^(`{3,}|~{3,}|\$\$)/.exec(token.raw)?.[1];
+	const marker = /^(`{3,}|~{3,})/.exec(token.raw)?.[1];
 	const lastLine = token.raw.split("\n").pop();
 	if (!marker || !lastLine || lastLine.length >= marker.length || lastLine !== marker[0]?.repeat(lastLine.length)) {
 		return;
@@ -47,42 +48,62 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
-const mathExtension = {
-	name: "math",
+/**
+ * Display math on its own lines: `$$ ... $$`, `\[ ... \]`, or a bare `\begin{env} ... \end{env}`. An unclosed
+ * block runs to the end, so math shows while it streams.
+ */
+const mathBlockExtension = {
+	name: "mathBlock",
 	level: "block" as const,
 	start(src: string) {
-		return src.match(/\$\$/)?.index;
+		return /^ {0,3}(?:\$\$|\\\[|\\begin\{)/m.exec(src)?.index;
 	},
 	tokenizer(src: string) {
-		// Match block math (either $$ on its own line or wrapping content), optionally unclosed
-		const match = /^\$\$([\s\S]*?)(?:\$\$|$)/.exec(src);
-		if (match) {
-			return {
-				type: "code",
-				raw: match[0],
-				text: match[1].trim(),
-				lang: "latex",
-			};
+		const dollars = /^ {0,3}\$\$([\s\S]*?)(\$\$[^\S\n]*(?:\n|$)|$)/.exec(src);
+		if (dollars) {
+			// While streaming, the first `$` of the closing pair arrives alone.
+			const text = dollars[2] ? dollars[1]! : dollars[1]!.replace(/\$$/, "");
+			return { type: "mathBlock", raw: dollars[0], text };
 		}
+		const brackets = /^ {0,3}\\\[([\s\S]*?)(?:\\\][^\S\n]*(?:\n|$)|$)/.exec(src);
+		if (brackets) return { type: "mathBlock", raw: brackets[0], text: brackets[1]! };
+		const environment = /^ {0,3}\\begin\{([^}]+)\}[\s\S]*?(?:\\end\{\1\}[^\S\n]*(?:\n|$)|$)/.exec(src);
+		if (environment) return { type: "mathBlock", raw: environment[0], text: environment[0] };
+		return undefined;
 	},
 };
 
-const inlineMathExtension = {
-	name: "inlineMath",
+/**
+ * Inline math: `$...$`, `$$...$$`, `\(...\)` and `\[...\]`. A `$` pair follows Pandoc's rule (no space inside
+ * either `$`, no digit after the closing one) so "$5 and $10" stays text. Models also write bare LaTeX in prose,
+ * such as `the integral \iiint_E f\,dV`; a run that starts with a command the converter knows is converted too.
+ */
+const mathInlineExtension = {
+	name: "mathInline",
 	level: "inline" as const,
 	start(src: string) {
-		return src.match(/\$/)?.index;
+		return /\$|\\[a-zA-Z([,;:!]/.exec(src)?.index;
 	},
 	tokenizer(src: string) {
-		// Match inline math wrapped in $, optionally unclosed for streaming
-		const match = /^\$([^$\n]*?)(?:\$|$)/.exec(src);
-		if (match) {
-			return {
-				type: "codespan",
-				raw: match[0],
-				text: match[1].trim(),
-			};
+		const delimited =
+			/^\$\$(?!\$)([\s\S]+?)\$\$/.exec(src) ??
+			/^\$(?=[^\s$])((?:\\.|[^$\\\n])*?[^\s\\])\$(?!\d)/.exec(src) ??
+			/^\\\(([\s\S]+?)\\\)/.exec(src) ??
+			/^\\\[([\s\S]+?)\\\]/.exec(src);
+		if (delimited) return { type: "mathInline", raw: delimited[0], text: delimited[1]!, bare: false };
+
+		const command = /^\\([a-zA-Z]+|[,;:!])/.exec(src);
+		if (!command || (/^[a-zA-Z]/.test(command[1]!) && !isKnownLatexCommand(command[1]!))) return undefined;
+		// Take the run up to the next space outside braces, stopping before Markdown emphasis and code.
+		let end = command[0].length;
+		let depth = 0;
+		for (; end < src.length; end++) {
+			const ch = src[end]!;
+			if (ch === "{") depth++;
+			else if (ch === "}") depth = Math.max(0, depth - 1);
+			else if (depth === 0 && /[\s*`$]/.test(ch)) break;
 		}
+		return { type: "mathInline", raw: src.slice(0, end), text: src.slice(0, end), bare: true };
 	},
 };
 
@@ -90,7 +111,7 @@ const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
-markdownParser.use({ extensions: [mathExtension, inlineMathExtension] });
+markdownParser.use({ extensions: [mathBlockExtension, mathInlineExtension] });
 
 /**
  * Default text styling for markdown content.
@@ -420,12 +441,7 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
-				const isMath = token.lang === "latex" || token.lang === "math";
-
-				if (!isMath) {
-					lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
-				}
-
+				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
 				if (this.theme.highlightCode) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
@@ -435,18 +451,10 @@ export class Markdown implements Component {
 					// Split code by newlines and style each line
 					const codeLines = token.text.split("\n");
 					for (const codeLine of codeLines) {
-						if (isMath && this.theme.code) {
-							lines.push(`${indent}${this.theme.code(codeLine)}`);
-						} else {
-							lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
-						}
+						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 					}
 				}
-
-				if (!isMath) {
-					lines.push(this.theme.codeBlockBorder("```"));
-				}
-
+				lines.push(this.theme.codeBlockBorder("```"));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -535,6 +543,17 @@ export class Markdown implements Component {
 				lines.push("");
 				break;
 
+			case "mathBlock": {
+				const indent = this.theme.codeBlockIndent ?? "  ";
+				for (const mathLine of latexToUnicode(token.text).split("\n")) {
+					lines.push(`${indent}${this.theme.code(mathLine)}`);
+				}
+				if (nextTokenType && nextTokenType !== "space") {
+					lines.push("");
+				}
+				break;
+			}
+
 			default:
 				// Handle any other token types as plain text
 				if ("text" in token && typeof token.text === "string") {
@@ -589,6 +608,17 @@ export class Markdown implements Component {
 				case "codespan":
 					result += this.theme.code(token.text) + stylePrefix;
 					break;
+
+				case "mathInline": {
+					const math = latexToUnicode(token.text);
+					if (token.bare) {
+						// Bare LaTeX is part of the sentence: keep the space a leading `\,` stood for.
+						result += applyTextWithNewlines(/^\\[,;:]/.test(token.text) ? ` ${math}` : math);
+					} else {
+						result += this.theme.code(math) + stylePrefix;
+					}
+					break;
+				}
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
