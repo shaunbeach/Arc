@@ -4,12 +4,12 @@ A terminal coding assistant for local models served by llama.cpp. It starts `lla
 
 Arc is a modified version of [pi](https://github.com/earendil-works/pi), the terminal coding agent by Mario Zechner and contributors. It keeps pi's agent loop, tools, and terminal UI library, and drops the cloud providers, logins, extensions, and telemetry. See [Origin and license](#origin-and-license).
 
-- **Local models.** Models, ports, and llama-server arguments come from `models.yml`; the model runs on llama-server. The only other network requests come from the web tools, which `/web off` turns off.
+- **Local models.** Models, ports, and llama-server arguments come from `models.yml`; the model runs on llama-server. The only other network requests come from the web tools, which `/web off` turns off, and from the optional browser, subagent, and MCP servers you turn on.
 - **Small prompt.** The system prompt and tool definitions take under 1,000 tokens (about 100 more with `/rag on`, about 200 with `/ponytail`) and stay byte-identical until you switch mode, `/web`, `/rag`, or `/ponytail`, so llama.cpp reuses its KV cache.
-- **Small process.** One Node process (about 60 MB resident) running a single 590 KB file. llama-server runs only while Arc does.
+- **Small process.** One Node process (about 60 MB resident) running a single 1 MB file. llama-server runs only while Arc does.
 - **Three ways to work.** Agent mode changes code, plan mode researches and plans without changing files, chat mode just talks. Thinking and instruct sampling switch independently.
 - **Built for long runs in small windows.** Trimming keeps a record of what it removes, so a model with a 16k window does not lose track of the files it wrote. See [Context window](#context-window).
-- **Terminal friendly.** Renders on the main screen, so tmux and terminal scrollback keep working. Sessions are saved as append-only JSONL.
+- **Terminal friendly.** Renders on the main screen, so tmux and terminal scrollback keep working, and shows LaTeX math as Unicode (`\iiint_E f\,dV` as `∭_E f dV`). Sessions are saved as append-only JSONL.
 
 **New to Arc? Start with [QUICKSTART.md](QUICKSTART.md)**: step-by-step setup on a Mac, with a first model.
 
@@ -39,7 +39,7 @@ Arc was called pi-lite. The first time `arc` runs, it moves `~/.pi-lite` to `~/.
 
 ## models.yml
 
-Arc reads `--models <path>`, else `$ARC_MODELS`, else `./models.yml`, else `~/.arc/models.yml`. `arc --init` writes a commented starter file to the last location. Only the `providers:` key is read, so the file can hold settings for other tools; to share one file, symlink it to `~/.arc/models.yml`.
+Arc reads `--models <path>`, else `$ARC_MODELS`, else `./models.yml`, else `~/.arc/models.yml`. `arc --init` writes a commented starter file to the last location. Only `providers:`, `rag:`, `supervisor:`, `subagent:`, `tests:`, and `sandbox:` are read, so the file can hold settings for other tools; to share one file, symlink it to `~/.arc/models.yml`.
 
 ```yaml
 providers:
@@ -83,7 +83,7 @@ providers:
 Connected to Ornith-1.5-9B-Q4_K_M at http://192.168.1.27:8080 · ctx 65.5k · reply 8.2k · thinking · vision · b10809-5266f24da
 ```
 
-The GGUF name, the context window, whether it loaded a projector, and whether its template supports thinking all come from the server, so the banner and footer name the real model and `read` attaches images only when it can. Start something else there and `/model Remote` again: it asks afresh. Arc never starts a server for such an entry: it says `Nothing is serving at ...` when the address is quiet, and `Lost the connection to ...` when a server that had answered stops or the route to it goes down.
+The GGUF name, the context window, whether it loaded a projector, and whether its template supports thinking all come from the server, so the banner and footer name the real model and `read` attaches images only when it can. Arc asks which model the server runs before each request, so when you start something else there it reconnects by itself, reads the new model's window and thinking switch, and says so: `http://127.0.0.1:8091 now runs katcoder-30B (was qwen36-35B); reconnected · ctx 65.5k → 16.4k`. The change is recorded in the session and in a supervisor run's report. Arc never starts a server for such an entry: it says `Nothing is serving at ...` when the address is quiet, and `Lost the connection to ...` when a server that had answered stops or the route to it goes down.
 
 `maxTokens` is the one thing `/props` does not advertise, being Arc's reply reserve rather than a server setting; left out it defaults to a quarter of the reported window, capped at 8192. Per-request variants are not discoverable either, so reasoning-effort levels still need one ordinary entry each.
 
@@ -136,6 +136,9 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/mode [thinking\|instruct]` | Switch sampling mode. Without an argument, toggles. |
 | `/agent`, `/plan`, `/chat` | Switch how the model works. See [Modes](#modes). |
 | `/web [on\|off]` | Give the model the web tools, or take them away. Without an argument, toggles. |
+| `/browser [on\|off]` | Give the model `browser_capture`, a headless-browser screenshot tool, or take it away. See [Browser](#browser). |
+| `/subagent [on\|off]` | Give the model `deep_research`, a read-only research subagent, or take it away. See [Subagent](#subagent). |
+| `/mcp [server\|all\|off]` | List the MCP servers in `mcp.yml`, start or stop one, or start or stop all. See [MCP servers](#mcp-servers). |
 | `/sandbox [on\|net\|off]` | Limit what bash may write and reach. Without an argument, shows the current limits. See [Sandbox](#sandbox). |
 | `/rag [on\|off]` | Let the model search your offline knowledge base. Without an argument, toggles. See [Knowledge base](#knowledge-base). |
 | `/mempalace [wing]` | Save this project's sessions to MemPalace and let the model search them. See [Memory](#memory). |
@@ -146,11 +149,17 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `/clear` | Clear the conversation and start a new session (also `/new`, `/cls`, `/reset`). |
 | `/resume [number\|name\|id]` | Resume a saved session from this directory: its number in the banner's recent list, part of its `/name`, or its id. Without an argument, opens a picker. |
 | `/name <text>` | Name this session. The banner and `/resume` show the name instead of the first message. |
+| `/cd <path>` | Carry on in another directory: the prompt, tools, sandbox, MemPalace wing, `mcp.yml` and its running servers, and the session list follow. |
+| `/export [path]` | Save the conversation as Markdown. |
+| `/raw` | Show the conversation as plain Markdown in the chat, ready to copy. |
+| `/recap` | Ask the model to summarize the conversation so far. |
 | `/supervise [plan.md\|resume\|stop\|report\|reload\|check plan.md]` | Work through a phased plan unattended, with a critic model judging each phase. Without an argument, shows where it is; `report` shows time and tokens per phase; `reload` adopts a plan you changed and committed; `check` looks a plan over before a run. See [Supervisor](#supervisor). |
 | `/audit [critic]` | Check and judge the current supervised phase now, optionally with another critic, then carry on. |
 | `/usage` | Show the tokens this session used: input (cached and new), output, and requests. While supervising, the critic's too. |
 | `/test [eval\|workbench\|all] [quick]` | Benchmark the loaded model with your test suites; `/test stop` ends a run. See [Testing models](#testing-models). |
 | `/quit` | Exit. |
+| `!command` | Run a shell command and show its output; the output goes with your next message, so several commands can gather context before a question. Esc stops it. |
+| `!!command` | Hand the terminal to an interactive command, such as an editor or a pager, then press Enter to return. |
 
 | Key | Effect |
 |---|---|
@@ -158,6 +167,7 @@ The startup banner lists this directory's five most recent sessions (three on a 
 | `ctrl+c` | Abort or stop hosting; otherwise clear the editor; otherwise exit |
 | `ctrl+d` | Exit when the editor is empty |
 | `shift+tab` | Switch sampling mode |
+| `alt+enter` | Send the message now, interrupting the model |
 
 You can keep typing while the model works. Each message you send is queued, and the status line counts them ("2 queued"):
 
@@ -165,6 +175,8 @@ You can keep typing while the model works. Each message you send is queued, and 
 - When it finishes a reply without tool calls, they are sent next as a new message.
 - While a model loads or `/compact` runs, they wait and go out when it is done.
 - If you press `esc` to abort, they come back into the editor instead of being sent.
+
+Commands you type with `!` and `!!` run outside the [sandbox](#sandbox), which limits the model, not you.
 
 Commands such as `/web`, `/rag`, or `/ponytail` are not queued: they run right away, and a change to the model's tools takes effect with your next message.
 
@@ -174,11 +186,11 @@ The footer shows the model, the sampling mode, `[plan]` or `[chat]`, `[no web]`,
 
 | Mode | Tools | Use it to |
 |---|---|---|
-| agent | read, edit, write, bash, web_search, web_fetch | change code, run commands and tests |
-| plan | read, web_search, web_fetch | research the project and write a plan, without changing files |
-| chat | web_search, web_fetch | talk, look things up |
+| agent | read, edit, write, bash, web_search, web_fetch, and every MCP tool | change code, run commands and tests |
+| plan | read, web_search, web_fetch, and read-only MCP tools | research the project and write a plan, without changing files |
+| chat | read, web_search, web_fetch, and read-only MCP tools | talk, look things up, ask about files |
 
-Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`. The mode and the `/web`, `/rag`, and `/ponytail` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on, the knowledge base off, and ponytail off.
+Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_search`; `browser_capture` and `deep_research` are agent-mode tools. The mode and the `/web`, `/rag`, `/browser`, `/subagent`, and `/ponytail` settings are saved with the session, so `-c` resumes where you left off; `/clear` starts again in agent mode with the web tools on, the knowledge base off, and ponytail off.
 
 ## Web tools
 
@@ -190,6 +202,51 @@ Each mode has its own system prompt. With `/rag on`, every mode also gets `kb_se
 - In plan and chat modes, where the web tools are all the model has, `web_fetch` refuses loopback and private addresses, including through redirects, so a page cannot steer the model into your local network. Agent mode reaches them, as bash could anyway.
 
 `ARC_WEB_TIMEOUT_MS` changes the request timeout (30 s for pages, 20 s for searches). `/web off` removes both tools and every mention of them from the prompt.
+
+## Browser
+
+`/browser on` gives the model `browser_capture`, which opens a URL in headless Chromium and returns a screenshot. Only models that accept images get it. The first use installs Playwright and Chromium into `~/.arc/browser/` (a few hundred MB, once); later captures take about a second.
+
+It opens only `http:` and `https:` URLs. In plan and chat modes it refuses local and private addresses like `web_fetch`, blocks a page's requests to them, and checks every redirect before following it. Page loads time out after `ARC_WEB_TIMEOUT_MS` (30 s), and esc closes the browser. For clicking and filling in forms, use a Playwright [MCP server](#mcp-servers) instead.
+
+## Subagent
+
+`/subagent on` gives the model `deep_research`: it hands a broad question about the project to a second, smaller model, which searches and reads in its own context and returns only its report. Name the model in `models.yml`:
+
+```yaml
+subagent:
+  model: MiniCPM5-2B   # any entry; it runs beside the main model, so it needs its own port
+  maxTurns: 20         # turns before it must report
+  timeoutMinutes: 5    # minutes before it must report
+```
+
+- **It runs beside the main model**, so it is offered only when the two use different servers. With both on port 8080 the tool is left out and `/subagent on` says why; a server on its port running another model makes it stop at once with that reason.
+- **It cannot change anything.** It gets `read` and `bash`, and its bash runs in a read-only [sandbox](#sandbox): no writes to the project, no internet. Without the sandbox (not macOS), it gets `read` only.
+- **Only the report comes back**, capped like other tool output; its steps show in the tool view while it runs. At its turn or time limit it loses its tools and is asked for the report it has.
+- It starts and stops its model's llama-server each time, a few seconds for a small model.
+
+## MCP servers
+
+Arc starts [MCP](https://modelcontextprotocol.io) servers listed in `./mcp.yml`, else `~/.arc/mcp.yml`:
+
+```yaml
+servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp@4.1.1"]
+    readOnly: true            # its tools only read, so plan and chat modes may use them
+  playwright:
+    command: npx
+    args: ["-y", "@playwright/mcp@0.0.82"]
+    env:
+      SOME_SETTING: value     # added to Arc's environment; keep keys in your shell profile, not here
+```
+
+- `/mcp` lists the servers, `/mcp <server>` starts or stops one, `/mcp all` starts the rest, `/mcp off` stops them all. They run in the working directory, and `/cd` restarts them in the new one.
+- **Modes.** Agent mode gets every MCP tool. Plan and chat get only tools marked read-only, by the server (`readOnlyHint`) or by `readOnly: true`.
+- **Names.** A tool named like a built-in tool or another server's is renamed `<server>_<name>`, and `/mcp` says so.
+- **Cost.** Every tool's definition goes into each request, and some servers bring dozens, so start only the servers a task needs.
+- A server's stderr is kept out of the screen; a server that fails to start shows its last lines. `mcp.yml` can hold keys and local paths, so it is gitignored here.
 
 ## Sandbox
 
@@ -206,7 +263,7 @@ The sandbox is off by default; turn it on with `/sandbox on` or `level: on` in `
 - **Localhost** stays reachable at `on`, so tests can start a dev server and call it.
 - **Also blocked:** AppleEvents, so `osascript` cannot ask Finder to delete a file, and `open`, which would start apps and browsers outside the sandbox. The model is told to give you the file's path instead, so open charts and other files yourself.
 - **When a command is blocked**, the result tells the model so, and not to retry or look for another way, since small models otherwise read "Could not resolve host" as a flaky network.
-- **Not covered:** `web_search` and `web_fetch` run inside Arc, not through bash; `/web off` removes them. The sandbox also limits where commands write, not how much: see below for a cap.
+- **Not covered:** `web_search`, `web_fetch`, and `browser_capture` run inside Arc, not through bash; `/web off` and `/browser off` remove them. MCP servers and the commands you type with `!` and `!!` run outside the sandbox too. The sandbox also limits where commands write, not how much: see below for a cap.
 
 `/sandbox on` to confine a project, `/sandbox net` for a task that installs packages. The footer shows `[sandbox: on]` or `[sandbox: net]` while the sandbox is active. The level is not saved with the session: each start takes it from `models.yml`, off unless it sets a level, so set `level: on` there before an unattended overnight run.
 
@@ -290,7 +347,7 @@ It costs about 200 tokens per request while it is on, nothing while it is off. T
 
 ```yaml
 supervisor:
-  critic: Ornith-1.5-9B-65k-Vision   # any local model entry
+  critic: Ornith-1.5-9B-65k-Vision   # any entry, including a discover entry or the actor's own model
   maxRetries: 3                      # failed attempts at one phase before a fresh start, and again before halting
   attemptMinutes: 90                 # longest one actor turn may run
 ```
@@ -311,7 +368,7 @@ For each phase:
 
 1. The actor gets the phase text and the list of checks, and works until it ends its turn.
 2. The checks run in order. If one fails, the phase fails with its output, and the critic is skipped.
-3. Otherwise Arc stops the actor's llama-server and starts the critic's with a 64k window, which fits a 16 GB Mac. The critic reads the phase, the `git diff` since the phase began (cut to 60% of its window), the check output, and any images the checks saved: as images when the critic has a vision projector (`mmproj:` in `models.yml`, or `--mmproj` in `launchArgs`), otherwise as paths. A grammar forces its answer to pass, or fail with up to five reasons.
+3. Otherwise Arc stops the actor's llama-server and starts the critic's with a 64k window, which fits a 16 GB Mac. A critic on the actor's own model reviews on the server already running, and a `discover` critic is asked what it runs first, so the review is sized to its real window. The critic reads the phase, the `git diff` since the phase began (cut to 60% of its window), the check output, and any images the checks saved: as images when the critic has a vision projector (`mmproj:` in `models.yml`, or `--mmproj` in `launchArgs`), otherwise as paths. A grammar forces its answer to pass, or fail with up to five reasons.
 4. A pass is committed as `arc: phase N passed: title`, and the next phase starts in a fresh context: the actor gets the whole window, plus a list of the files earlier phases built. A fail goes back to the actor with the reasons, and the actor keeps its history of the phase. After the critic fails a phase, its next review also gets its earlier reasons and the changes made since, and judges whether each reason is fixed and the fix broke nothing, rather than hunting for new problems in code it already saw. An unmet "Done when" item still fails the phase.
 5. A loop guard watches the actor. If it makes the same tool call 3 times among its last 5, or one turn runs past `attemptMinutes`, Arc ends the turn and checks the phase right away. On a fail, the actor is told why it was stopped.
 6. After `maxRetries` fails, the phase starts once more in a fresh context: its work stays on disk, and the actor gets the phase brief plus the last review's reasons, without the window full of earlier attempts. After `maxRetries` more fails, the loop halts and shows a macOS notification. Fix what is needed, then `/supervise resume`: the phase gets its retries and its fresh start back.
@@ -330,7 +387,7 @@ If the project has an `AGENTS.md`, every phase brief includes it (up to about 3,
 
 `/supervise report` shows each phase's time (the actor's work and the review), its tries, and the tokens both models used, and saves the same as `supervisor-report.md` in the project. A finished run saves it by itself. Time the loop spent halted, waiting for you, is left out. The saved file also has what the run ran on (models, settings, Arc and llama.cpp versions, memory), each phase's files and lines changed, tool calls and failures, trims, loop-guard stops, your hints, the actor's reading and writing time, every failed try with its reasons, model load times, and peak swap.
 
-Every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
+Unless the critic is the actor's own model, every switch between the models reloads the actor, which then reads its context again: llama.cpp cannot restore a saved cache for hybrid models such as Qwen3.5 and 3.8. `packages/arc/scripts/slot-bench.ts --model <name>` measures whether a model's saved cache is reused.
 
 ## Testing models
 
@@ -388,8 +445,9 @@ packages/arc          the app
   src/cli.ts           flags and print mode
   src/config/          models.yml loader, sampling presets
   src/llm/             llama.cpp client (fetch and SSE), llama-server manager, swap monitor, /props discovery
-  src/agent/           agent loop
-  src/tools/           read, edit, write, bash, web_search, web_fetch, kb_search, and the sandbox bash runs in
+  src/agent/           agent loop, and the subagent's research loop
+  src/tools/           read, edit, write, bash, web_search, web_fetch, kb_search, browser_capture, deep_research, and the sandbox bash runs in
+  src/mcp/             MCP servers from mcp.yml, and their tools
   src/rag/             kiwix-serve, and cutting articles down to the parts that match
   src/context.ts       context window trimming
   src/work-log.ts      the work log sent with trimmed tasks
@@ -399,7 +457,7 @@ packages/arc          the app
   src/session.ts       JSONL sessions
   src/supervisor/      /supervise: plan parsing, checks, git, the critic, and the loop
   src/tui/             terminal UI
-packages/tui           pi-tui, trimmed to the main-screen renderer, editor, markdown, and select list
+packages/tui           pi-tui, trimmed to the main-screen renderer, editor, markdown (with LaTeX to Unicode), and select list
 ```
 
 ## Development

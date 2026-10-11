@@ -61,7 +61,7 @@ Options:
       --verbose               Print every request body to stderr (print mode)
   -h, --help                  Show this help
 
-Interactive commands: /agent  /plan  /chat  /web [on|off]  /rag [on|off]  /ponytail [off|lite|full|ultra]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [number|name|id]  /name <text>  /supervise [plan.md|resume|stop|report|reload|check plan.md]  /audit [critic]  /usage  /quit
+Interactive commands: /agent  /plan  /chat  /web [on|off]  /browser [on|off]  /subagent [on|off]  /mcp [server|all|off]  /rag [on|off]  /sandbox [on|net|off]  /mempalace [wing]  /ponytail [off|lite|full|ultra]  /model [name]  /mode [thinking|instruct]  /serve [name]  /disconnect  /compact  /clear  /resume [number|name|id]  /name <text>  /cd <path>  /export [path]  /raw  /recap  /supervise [plan.md|resume|stop|report|reload|check plan.md]  /audit [critic]  /usage  /test  /quit  !command  !!command
 `;
 
 function dim(text: string): string {

@@ -123,7 +123,7 @@ message and press Return.
 |---|---|
 | `/agent` | **Default.** The model can read and change files and run commands in this folder, *without asking first* |
 | `/plan` | Reads and researches, but changes nothing |
-| `/chat` | Just talks (and searches the web) |
+| `/chat` | Talks, reads files, and searches the web, but changes nothing |
 | `/mode instruct` | Answers straight away (faster) |
 | `/mode thinking` | Thinks before answering (slower, better at hard problems) |
 | `/web off` | No internet for the model |
